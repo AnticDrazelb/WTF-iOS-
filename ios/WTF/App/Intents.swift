@@ -46,7 +46,7 @@ struct ToggleListeningIntent: AudioRecordingIntent, LiveActivityIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        let answer = await AppModel.shared.toggleListeningFromShortcut(forward: { await comeForward() })
+        let answer = await AppModel.shared.toggleListeningFromShortcut(forward: { await comeForward() }, recordingIntent: true)
         return .result(dialog: "\(answer)")
     }
 }
@@ -59,7 +59,7 @@ struct StartListeningIntent: AudioRecordingIntent, LiveActivityIntent {
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
         AppModel.shared.buttonPressedAt = Date()
-        let started = await AppModel.shared.startListeningFromShortcut(forward: { await comeForward() })
+        let started = await AppModel.shared.startListeningFromShortcut(forward: { await comeForward() }, recordingIntent: true)
         let answer = started ? "WTF is listening." : AppModel.shared.problem ?? "Couldn't start listening."
         return .result(dialog: "\(answer)")
     }

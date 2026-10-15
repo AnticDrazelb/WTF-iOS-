@@ -141,10 +141,11 @@ final class AppModel {
     /// Starts listening and returns once it has (or couldn't): for the app, and for the Action
     /// button and controls, which start it without opening the app. A second ask while a start is
     /// under way (the app coming forward as a press starts it) waits for that one.
+    /// [tries]: how many times to ask for the microphone (one, for a quick try from the background).
     @discardableResult
-    func startListening() async -> Bool {
+    func startListening(tries: Int = 4) async -> Bool {
         if let starting { return await starting.value }
-        let start = Task { await startListeningNow() }
+        let start = Task { await startListeningNow(tries: tries) }
         starting = start
         isStarting = true
         let started = await start.value
@@ -157,7 +158,7 @@ final class AppModel {
     /// Counts stops, so a stop's tidying up doesn't run into a listening session started since.
     @ObservationIgnored private var stops = 0
 
-    private func startListeningNow() async -> Bool {
+    private func startListeningNow(tries: Int) async -> Bool {
         if recording && Recorder.shared.running { return true }
         guard await AVPermissions.microphone() else {
             problem = "WTF needs the microphone: Settings › Privacy & Security › Microphone."
@@ -180,7 +181,7 @@ final class AppModel {
             await LiveTranscriber.shared.start()
             microphone = true
             let stopsBefore = stops
-            try await switchMicrophoneOn()
+            try await switchMicrophoneOn(tries: tries)
             if stops != stopsBefore {
                 // Stopped while it was starting: stays stopped.
                 Recorder.shared.stop()
@@ -216,17 +217,17 @@ final class AppModel {
 
     /// The microphone on, with a few quick tries: from the Lock Screen or the Action button, iOS
     /// can be holding the audio for a moment (its own panel) and say no to the first ask.
-    private func switchMicrophoneOn() async throws {
+    private func switchMicrophoneOn(tries: Int) async throws {
         var lastError: Error?
-        for attempt in 1...4 {
+        for attempt in 1...max(1, tries) {
             do {
                 try Recorder.shared.start()
                 if attempt > 1 { Log.info("The microphone came on at try \(attempt)") }
                 return
             } catch {
                 lastError = error
-                Log.error("The microphone didn't come on (try \(attempt) of 4)", error)
-                if attempt < 4 { try? await Task.sleep(for: .milliseconds(400 * attempt)) }
+                Log.error("The microphone didn't come on (try \(attempt) of \(tries))", error)
+                if attempt < tries { try? await Task.sleep(for: .milliseconds(400 * attempt)) }
             }
         }
         if let lastError { throw lastError }
@@ -236,11 +237,13 @@ final class AppModel {
     /// from the background. True if WTF's now in front.
     typealias ComeForward = @MainActor () async -> Bool
 
-    /// Listening on, from the Action button or a Shortcut. iOS doesn't let apps other than its own
-    /// switch the microphone on from the background, so from there [forward] brings WTF forward
-    /// first and it starts there: nothing's tried in the background, where a try only fails, and
-    /// with WTF already open it just starts. Without [forward] (a control) it tries where it is.
-    func startListeningFromShortcut(forward: ComeForward? = nil) async -> Bool {
+    /// Listening on, from the Action button or a Shortcut. From the background, a recording
+    /// shortcut ([recordingIntent]: Start Listening, Start or Stop Listening) tries once where it
+    /// is, its Lock Screen card up first, as Apple's rules for those allow; only if iOS says no
+    /// does [forward] bring WTF forward to start there. Any other (the WTF Menu) can't record
+    /// from the background, so it comes forward straight away. With WTF already open it just
+    /// starts. Without [forward] (a control) it tries where it is.
+    func startListeningFromShortcut(forward: ComeForward? = nil, recordingIntent: Bool = false) async -> Bool {
         // Apple's rule for recording shortcuts: listening started from one needs its Lock Screen
         // card, and with Live Activities turned off there isn't one.
         guard ListeningActivity.allowed else {
@@ -248,6 +251,13 @@ final class AppModel {
             return false
         }
         if let forward, UIApplication.shared.applicationState == .background, !Recorder.shared.running {
+            if recordingIntent {
+                if await startListening(tries: 1) {
+                    Log.info("Started listening from a shortcut without opening WTF")
+                    return true
+                }
+                Log.info("iOS didn't let WTF start listening from the background; opening WTF to start it")
+            }
             guard await forward() else {
                 problem = "iOS didn\u{2019}t let WTF switch the microphone on from here. Open WTF to start listening."
                 return false
@@ -620,13 +630,13 @@ final class AppModel {
     private var lastPress = Date.distantPast
 
     /// Listening on or off, from a control or a Shortcut, without opening the app.
-    func toggleListeningFromShortcut(forward: ComeForward? = nil) async -> String {
+    func toggleListeningFromShortcut(forward: ComeForward? = nil, recordingIntent: Bool = false) async -> String {
         buttonPressedAt = Date()
         if recording {
             setListening(false)
             return "WTF has stopped listening."
         }
-        return await startListeningFromShortcut(forward: forward) ? "WTF is listening." : (problem ?? "Couldn't start listening.")
+        return await startListeningFromShortcut(forward: forward, recordingIntent: recordingIntent) ? "WTF is listening." : (problem ?? "Couldn't start listening.")
     }
 
     /// Your list, read out (or shown): what's coming up, what to do, what to buy.
