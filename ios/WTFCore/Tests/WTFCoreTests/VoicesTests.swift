@@ -160,6 +160,16 @@ final class ThreadsTests: XCTestCase {
         XCTAssertTrue(s.hasSuffix("lovely little\u{2026} Then Speaker 2 cut in."), s)
     }
 
+    func testSpokenRecapDoesntCallAnUnknownVoiceSpeech() {
+        let t = """
+            [10:00:00] Speaker 1: Did it work?
+            [10:00:03] Speech: They took the picture and it processed it and it did that thing.
+            """
+        let ten = Calendar.current.date(bySettingHour: 10, minute: 0, second: 0, of: t0)!
+        let s = QuickRecap.spoken(t, start: ten, now: ten.addingTimeInterval(5))!
+        XCTAssertTrue(s.hasPrefix("Someone was saying, just now: They took the picture"), s)
+    }
+
     func testGettingAnAnswerIsntShopping() {
         let lines = ["[11:43:10] Speaker 1: We need to get a good answer on that.", "[11:43:20] Speaker 1: Can you pick up some milk and bread?"]
         let found = ActionRules.ruleActions(lines, conversationStart: Date(), title: nil, youOnly: false).filter { $0.type == .buy }.map(\.title)

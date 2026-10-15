@@ -63,7 +63,8 @@ public enum QuickRecap {
         } else if ownerKnown {
             out = "You were saying, \(said): \(quote)"
         } else {
-            out = "\(main.who) was saying, \(said): \(quote)"
+            let who = name(main.who)
+            out = "\(who.prefix(1).uppercased() + who.dropFirst()) was saying, \(said): \(quote)"
         }
         if main.cutOff { out += "\u{2026}" }
         if !anonymous, i + 1 < turns.count {

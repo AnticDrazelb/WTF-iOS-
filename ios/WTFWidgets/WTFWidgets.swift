@@ -52,6 +52,16 @@ struct ListControl: ControlWidget {
     }
 }
 
+/// The card and the pill look like the app: grey glass, white and grey text, the waveform and
+/// "Listening" from its own Listen button, and capsule buttons like the stop sheet's. No red: iOS's
+/// own orange dot already says the microphone's on.
+enum Look {
+    static let glass = Color(white: 0.16).opacity(0.72)
+    static let secondary = Color.white.opacity(0.6)
+    static let button = Color.white.opacity(0.14)
+    static let prominent = Color.white.opacity(0.24)
+}
+
 /// Under the card's heading, and in the pill when it's held open: the answer to the last press
 /// while it's fresh, otherwise the trail; then the buttons.
 struct CardBody: View {
@@ -71,9 +81,9 @@ struct CardBody: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 HStack(spacing: 8) {
                     if state.earlier {
-                        SmallControl(intent: WTFBeforeControlIntent(), icon: "backward.fill", label: "Before that")
+                        CapsuleButton(intent: WTFBeforeControlIntent(), icon: "backward.fill", label: "Before that")
                     }
-                    SmallControl(intent: WTFStopControlIntent(), icon: "stop.fill", label: "Stop")
+                    CapsuleButton(intent: WTFStopControlIntent(), icon: "stop.fill", label: "Stop")
                 }
             } else {
                 if state.trail.count > 1 && !inIsland { Trail(steps: state.trail) }
@@ -83,56 +93,44 @@ struct CardBody: View {
     }
 }
 
-/// The controls when you hold the listening pill (and on the Lock Screen card), laid out like
-/// music's: back a step, what was I saying, stop. Each works without opening WTF. Only those with
-/// something to do show: nothing to recap before anything's been heard, nothing to go back to
-/// before there's an earlier topic.
+/// The controls when you hold the listening pill (and on the Lock Screen card): back a step,
+/// what was I saying, stop, as a row of capsules. Each works without opening WTF. Only those
+/// with something to do show: nothing to recap before anything's been heard, nothing to go back
+/// to before there's an earlier topic.
 struct PillControls: View {
     let state: ListeningAttributes.ContentState
 
     var body: some View {
-        HStack(alignment: .top, spacing: 0) {
+        HStack(spacing: 8) {
             if state.earlier {
-                control(WTFBeforeControlIntent(), icon: "backward.fill", label: "Before that", size: 40)
+                CapsuleButton(intent: WTFBeforeControlIntent(), icon: "backward.fill", label: "Before")
             }
             if state.heard {
-                control(WTFAskControlIntent(), icon: "questionmark", label: "What was I saying?", size: 50)
+                CapsuleButton(intent: WTFAskControlIntent(), icon: "questionmark", label: "What was I saying?", prominent: true)
+                    .layoutPriority(1)
             }
-            control(WTFStopControlIntent(), icon: "stop.fill", label: "Stop", size: 40)
+            CapsuleButton(intent: WTFStopControlIntent(), icon: "stop.fill", label: "Stop")
         }
-        .frame(maxWidth: .infinity)
-    }
-
-    private func control<I: AppIntent>(_ intent: I, icon: String, label: String, size: CGFloat) -> some View {
-        Button(intent: intent) {
-            VStack(spacing: 5) {
-                Image(systemName: icon)
-                    .font(.system(size: size * 0.38, weight: .semibold))
-                    .frame(width: size, height: size)
-                    .background(Circle().fill(Color.white.opacity(0.16)))
-                Text(label).font(.caption2).lineLimit(1).minimumScaleFactor(0.8)
-            }
-            .foregroundStyle(.white)
-            .frame(maxWidth: .infinity)
-        }
-        .buttonStyle(.plain)
     }
 }
 
-/// A smaller button, for under an answer.
-struct SmallControl<I: AppIntent>: View {
+/// A button like the app's: icon and words on a grey capsule. [prominent]: the one you'll want most.
+struct CapsuleButton<I: AppIntent>: View {
     let intent: I
     let icon: String
     let label: String
+    var prominent = false
 
     var body: some View {
         Button(intent: intent) {
             Label(label, systemImage: icon)
-                .font(.caption.weight(.semibold))
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
                 .foregroundStyle(.white)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .background(Capsule().fill(Color.white.opacity(0.16)))
+                .padding(.horizontal, 14)
+                .frame(maxWidth: prominent ? .infinity : nil, minHeight: 34)
+                .background(Capsule().fill(prominent ? Look.prominent : Look.button))
         }
         .buttonStyle(.plain)
     }
@@ -143,66 +141,69 @@ struct ListeningLiveActivity: Widget {
         ActivityConfiguration(for: ListeningAttributes.self) { context in
             Group {
                 if context.isStale {
-                    // WTF stopped updating it (closed, or crashed): it isn't recording.
-                    Label("Not recording. Open WTF to listen.", systemImage: "mic.slash")
+                    // WTF stopped updating it (closed, or crashed): it isn't listening.
+                    Label("Not listening. Open WTF to carry on.", systemImage: "mic.slash")
                         .font(.headline).foregroundStyle(.white).padding(16)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
                     LockScreenCard(state: context.state)
                 }
             }
-                .activityBackgroundTint(Color.black.opacity(0.55))
+                .activityBackgroundTint(Look.glass)
                 .activitySystemActionForegroundColor(.white)
                 .widgetURL(URL(string: "wtf://ask"))
         } dynamicIsland: { context in
             let s = context.state
             return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    HStack(spacing: 5) {
-                        RecordingDot()
-                        Text("Recording").font(.caption.weight(.semibold)).foregroundStyle(.red)
-                    }
-                    .padding(.leading, 4)
+                    Label("Listening", systemImage: "waveform")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.leading, 4)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    Elapsed(since: s.since, font: .caption).frame(width: 56, alignment: .trailing)
+                    Elapsed(since: s.since, font: .subheadline).frame(width: 60, alignment: .trailing).padding(.trailing, 4)
                 }
                 DynamicIslandExpandedRegion(.center) {
                     // With an answer showing, the topic gives it its line: no empty line left either.
                     if context.isStale {
-                        Text("Not recording").font(.headline).lineLimit(1)
+                        Text("Not listening").font(.headline).lineLimit(1)
                     } else if s.answer == nil, let topic = s.topic {
                         Text(topic).font(.headline).lineLimit(1)
                     }
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    CardBody(state: s, inIsland: true).padding(.top, 2)
+                    CardBody(state: s, inIsland: true).padding(.top, 4)
                 }
             } compactLeading: {
-                RecordingDot().padding(.leading, 2)
+                ListeningMark(font: .caption).padding(.leading, 2)
             } compactTrailing: {
                 // A fixed width: a running time left to size itself fills the whole island.
                 Elapsed(since: s.since, font: .caption2, alignment: .center).frame(width: 40)
             } minimal: {
-                RecordingDot()
+                ListeningMark(font: .caption)
             }
             // A tap on the pill opens WTF to stop listening; holding it shows the buttons.
             .widgetURL(URL(string: "wtf://listening"))
-            .keylineTint(.red)
+            .keylineTint(.gray)
         }
         .supplementalActivityFamilies([.small])
     }
 }
 
-/// The red dot that says WTF's recording, wherever the card or the pill shows.
-struct RecordingDot: View {
+/// The waveform from WTF's own Listen button, wherever the card or the pill shows.
+struct ListeningMark: View {
+    var font: Font = .subheadline
+
     var body: some View {
-        Circle().fill(.red).frame(width: 9, height: 9)
+        Image(systemName: "waveform")
+            .font(font.weight(.semibold))
+            .foregroundStyle(.white)
     }
 }
 
-/// How long it's been recording, in red like Voice Memos. Always given a width: a running time
-/// takes all the room it's offered.
+/// How long it's been listening, in grey like the stop sheet's "Since…". Always given a width: a
+/// running time takes all the room it's offered.
 struct Elapsed: View {
     let since: Date
     let font: Font
@@ -210,8 +211,8 @@ struct Elapsed: View {
 
     var body: some View {
         Text(timerInterval: since...Date.distantFuture, countsDown: false)
-            .font(font.monospacedDigit().weight(.semibold))
-            .foregroundStyle(.red)
+            .font(font.monospacedDigit())
+            .foregroundStyle(Look.secondary)
             .multilineTextAlignment(alignment)
             .lineLimit(1)
             .minimumScaleFactor(0.6)
@@ -226,8 +227,8 @@ struct LockScreenCard: View {
         if family == .small {
             // Apple Watch Smart Stack: just the topic and what's hanging.
             VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 5) { RecordingDot(); Elapsed(since: state.since, font: .caption2, alignment: .leading).frame(width: 44, alignment: .leading) }
-                Text(state.topic ?? "Recording").font(.headline).lineLimit(2)
+                HStack(spacing: 5) { ListeningMark(font: .caption2); Elapsed(since: state.since, font: .caption2, alignment: .leading).frame(width: 44, alignment: .leading) }
+                Text(state.topic ?? "Listening").font(.headline).lineLimit(2)
                 if state.hanging > 0 {
                     Text("\(state.hanging) left hanging").font(.caption2).foregroundStyle(.secondary)
                 }
@@ -235,13 +236,12 @@ struct LockScreenCard: View {
             .padding(8)
         } else {
             // Kept under iOS's 160 points: heading, then the trail and the buttons, or an answer
-            // (which takes the topic's place) and its two small buttons.
+            // (which takes the topic's place) and its buttons: 12 + 22 + 8 + 64 + 8 + 34 + 12 at most.
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
-                    RecordingDot()
-                    if state.answer == nil {
-                        Text(state.topic ?? "Recording").font(.headline).foregroundStyle(.white).lineLimit(1)
-                    }
+                    ListeningMark()
+                    Text(state.answer == nil ? (state.topic ?? "Listening") : "WTF")
+                        .font(.headline).foregroundStyle(.white).lineLimit(1)
                     Spacer()
                     Elapsed(since: state.since, font: .subheadline).frame(width: 72, alignment: .trailing)
                 }
