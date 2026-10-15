@@ -47,7 +47,7 @@ struct DiagnosticsView: View {
             Pill, Lock Screen card and controls: \(ListeningActivity.drawable ? "installed" : "MISSING (reinstall WTF and keep its app extension)"), Live Activities \(ListeningActivity.allowed ? "allowed" : "turned off"), showing: \(ListeningActivity.states)
             Contacts: \(PersonalWords.useContacts && PersonalWords.contactsAllowed ? "used" : "not used"), calendar: \(PersonalWords.useCalendar && PersonalWords.calendarAllowed ? "used" : "not used")
             Corrections learnt: \(Learned.fixes.count)
-            Speech model: \(speech ? "ready" : "not installed")
+            Speech recogniser: \(SpeechEngine.recogniserName), \(speech ? "ready" : "not installed")
             Apple Intelligence: \(Brain.notReadyReason ?? "ready")
             Voices: \(VoiceEngine.enabled ? "on" : "off"), models \(VoiceEngine.downloaded ? "downloaded" : "not downloaded")
             \(health)

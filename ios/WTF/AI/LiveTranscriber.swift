@@ -61,7 +61,7 @@ final class LiveTranscriber: @unchecked Sendable {
         let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
         let results = Task { [weak self] in
             do {
-                for try await result in transcriber.results { self?.take(result) }
+                for try await heard in SpeechEngine.results(of: transcriber) { self?.take(heard) }
             } catch {
                 Log.error("Live transcription stopped", error)
             }
@@ -169,8 +169,8 @@ final class LiveTranscriber: @unchecked Sendable {
         return (a.chunk, (Double(a.offset) + Double(sample - a.sample)) / Self.rate)
     }
 
-    private func take(_ result: SpeechTranscriber.Result) {
-        let timed = SpeechEngine.timedWords(result)
+    private func take(_ result: SpeechEngine.Heard) {
+        let timed = result.words
         lock.lock(); defer { lock.unlock() }
         let placed = timed.compactMap { w -> TimedWord? in
             guard let p = place(w.start), p.chunk != .distantPast else { return nil }
@@ -183,7 +183,7 @@ final class LiveTranscriber: @unchecked Sendable {
         } else {
             provisional = placed
         }
-        finalThrough = max(finalThrough, result.resultsFinalizationTime.seconds)
+        finalThrough = max(finalThrough, result.finalThrough)
     }
 
     /// The words of the recording that started at [from], in seconds from its start, once they're

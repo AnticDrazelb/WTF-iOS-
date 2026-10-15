@@ -83,4 +83,5 @@ Findings from a full review of build 35 (five reviewers: listening, pipeline, As
 - [x] Voice models: "Download (22 MB)" is offered while the same download runs from the first Listen, and `VoiceEngine.prepare` can start a second concurrent download. Coalesce. (VoiceEngine.swift, SettingsView.swift)
 - [x] Diagnostics promises "no names" but the log records headphone names ("Sam's AirPods"). Log port types only. (ReadAloud.swift)
 - [x] `SpeechTranscriber` availability is never checked; the App Store will offer the app to every iOS 26 iPhone. Explain when the device can't transcribe.
+- [x] Older iPhones that can't run `SpeechTranscriber` (reportedly iPhone 11s, SE 2nd gen) now listen with `DictationTranscriber` instead of not at all; Settings and Diagnostics say which is in use. Check on an older iPhone if one's to hand. (SpeechEngine.swift, LiveTranscriber.swift)
 - [ ] Design call: recap and list intents use `.alwaysAllowed`, so they read conversation content on a locked phone (and the card shows topics/answers). Consider a setting.

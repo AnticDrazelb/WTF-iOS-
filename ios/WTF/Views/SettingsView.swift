@@ -43,8 +43,7 @@ struct SettingsView: View {
 
                 Section("On This iPhone") {
                     LabeledContent("Speech Recognition") {
-                        if !SpeechEngine.deviceCanTranscribe { Text("Not available").foregroundStyle(.orange) }
-                        else if downloading { ProgressView() }
+                        if downloading { ProgressView() }
                         else if speechReady == true { Text("Ready").foregroundStyle(.green) }
                         else if speechReady == false { Button("Download") { download() } }
                         else { ProgressView() }
@@ -52,8 +51,8 @@ struct SettingsView: View {
                     LabeledContent("Apple Intelligence") {
                         Text(Brain.notReadyReason == nil ? "Ready" : "Not available").foregroundStyle(Brain.notReadyReason == nil ? .green : .orange)
                     }
-                    if !SpeechEngine.deviceCanTranscribe {
-                        Text("This iPhone can\u{2019}t turn speech into text on the device, so WTF can\u{2019}t listen on it.").font(.footnote).foregroundStyle(.secondary)
+                    if SpeechEngine.usesDictation {
+                        Text("This iPhone can\u{2019}t run Apple\u{2019}s newer speech model, so WTF uses the dictation one (the keyboard\u{2019}s microphone). It\u{2019}s a little less accurate on long conversations.").font(.footnote).foregroundStyle(.secondary)
                     }
                     if let speechProblem { Text(speechProblem).font(.footnote).foregroundStyle(.red) }
                     if let why = Brain.notReadyReason { Text(why).font(.footnote).foregroundStyle(.secondary) }

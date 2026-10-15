@@ -159,11 +159,6 @@ final class AppModel {
 
     private func startListeningNow() async -> Bool {
         if recording && Recorder.shared.running { return true }
-        guard SpeechEngine.deviceCanTranscribe else {
-            Log.error("This iPhone can't transcribe speech on the device")
-            problem = "This iPhone can\u{2019}t turn speech into text on the device, which WTF needs to listen. Apple\u{2019}s on-device transcription isn\u{2019}t available on every iPhone that runs iOS 26."
-            return false
-        }
         guard await AVPermissions.microphone() else {
             problem = "WTF needs the microphone: Settings › Privacy & Security › Microphone."
             return false
