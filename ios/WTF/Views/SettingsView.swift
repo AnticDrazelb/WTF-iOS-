@@ -20,6 +20,11 @@ struct SettingsView: View {
     @AppStorage("useCalendar") private var useCalendar = false
     @AppStorage("airPodsMic") private var airPodsMic = false
     @State private var accessProblem: String?
+    @AppStorage("parakeet") private var betterOn = false
+    @AppStorage("parakeetDownloaded") private var betterDownloaded = false
+    /// How far the Better Accuracy download has got (0–1), while it's going.
+    @State private var betterProgress: Double?
+    @State private var betterFailed = false
 
     var body: some View {
         @Bindable var model = model
@@ -56,6 +61,23 @@ struct SettingsView: View {
                     }
                     if let speechProblem { Text(speechProblem).font(.footnote).foregroundStyle(.red) }
                     if let why = Brain.notReadyReason { Text(why).font(.footnote).foregroundStyle(.secondary) }
+                }
+
+                if Parakeet.suitable {
+                    Section {
+                        Toggle("Better Accuracy", isOn: Binding(get: { betterOn }, set: { setBetter($0) })).tint(.green)
+                        if betterOn {
+                            LabeledContent("Parakeet Model") {
+                                if let betterProgress { ProgressView(value: betterProgress).frame(width: 120) }
+                                else if betterDownloaded { Text("Ready").foregroundStyle(.green) }
+                                else { Button(betterFailed ? "Try Again" : "Download (440 MB)") { downloadBetter() } }
+                            }
+                        }
+                    } header: {
+                        Text("Transcription")
+                    } footer: {
+                        Text("When a conversation ends, WTF transcribes it again with NVIDIA\u{2019}s Parakeet speech model before writing it up: fewer misheard words, most of all with background noise. English only. A one-off download of about 440 MB, best on Wi-Fi; it runs on this iPhone, and turning it off deletes it. Live transcription still uses Apple\u{2019}s.")
+                    }
                 }
 
                 Section {
@@ -178,6 +200,43 @@ struct SettingsView: View {
                 accessProblem = "WTF wasn\u{2019}t given access. Turn it on in Settings › Privacy & Security › \(contacts ? "Contacts" : "Calendars") › WTF."
             }
             model.processNow()
+        }
+    }
+
+    /// Better Accuracy on: the model downloads. Off: it's deleted, to give the space back.
+    private func setBetter(_ on: Bool) {
+        betterOn = on
+        if on {
+            if !betterDownloaded { downloadBetter() }
+        } else {
+            betterProgress = nil
+            Task {
+                await Parakeet.shared.remove()
+                betterDownloaded = Parakeet.downloaded
+            }
+        }
+    }
+
+    private func downloadBetter() {
+        betterProgress = 0
+        betterFailed = false
+        Task {
+            do {
+                try await Parakeet.shared.prepare { fraction in
+                    Task { @MainActor in if betterProgress != nil { betterProgress = fraction } }
+                }
+                // Only needed when a conversation ends: not held in memory meanwhile.
+                await Parakeet.shared.unload()
+            } catch {
+                betterFailed = true
+            }
+            betterDownloaded = Parakeet.downloaded
+            betterProgress = nil
+            // Switched off while it was downloading: it doesn't stay.
+            if !betterOn, betterDownloaded {
+                await Parakeet.shared.remove()
+                betterDownloaded = false
+            }
         }
     }
 

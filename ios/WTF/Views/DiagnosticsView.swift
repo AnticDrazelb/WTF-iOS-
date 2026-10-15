@@ -48,6 +48,7 @@ struct DiagnosticsView: View {
             Contacts: \(PersonalWords.useContacts && PersonalWords.contactsAllowed ? "used" : "not used"), calendar: \(PersonalWords.useCalendar && PersonalWords.calendarAllowed ? "used" : "not used")
             Corrections learnt: \(Learned.fixes.count)
             Speech recogniser: \(SpeechEngine.recogniserName), \(speech ? "ready" : "not installed")
+            Better Accuracy (Parakeet): \(Parakeet.inUse ? "on" : Parakeet.enabled ? (Parakeet.downloaded ? "on, but not for this language" : "on, not downloaded") : "off")
             Apple Intelligence: \(Brain.notReadyReason ?? "ready")
             Voices: \(VoiceEngine.enabled ? "on" : "off"), models \(VoiceEngine.downloaded ? "downloaded" : "not downloaded")
             \(health)

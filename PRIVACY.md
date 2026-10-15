@@ -10,7 +10,7 @@ While listening is on, WTF records speech it hears through your iPhone's microph
 ## Where it goes
 Nowhere. Speech is transcribed, summarised and searched on your iPhone, using Apple's on-device speech recognition and Apple Intelligence. WTF has no servers, no accounts, no analytics and no advertising, and it collects no data. WTF's data is excluded from iCloud and computer backups.
 
-WTF downloads models it needs (speech recognition, a speech detector and voice models) once. These downloads don't include anything about you.
+WTF downloads models it needs (speech recognition, a speech detector and voice models) once. If you turn on Settings › Better Accuracy, it also downloads NVIDIA's Parakeet speech model (about 440 MB) from Hugging Face, once. These downloads don't include anything about you.
 
 ## What's kept
 - Recordings are deleted once their conversation is over.

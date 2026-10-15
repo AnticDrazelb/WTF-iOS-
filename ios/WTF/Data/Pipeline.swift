@@ -460,14 +460,18 @@ actor Pipeline {
 
     // MARK: - Hearing it again
 
-    /// Whether finished conversations are heard again as a whole (needs the voice models).
-    static var hearAgain: Bool { VoiceEngine.enabled && VoiceEngine.downloaded }
+    /// Whether finished conversations are heard again as a whole: for the voices (needs the voice
+    /// models), or the words (Settings › Better Accuracy).
+    static var hearAgain: Bool { voicesAgain || Parakeet.inUse }
+    private static var voicesAgain: Bool { VoiceEngine.enabled && VoiceEngine.downloaded }
     /// Longer than this, a conversation's left as it was transcribed (memory and battery).
     static let hearAgainLimit = 20.0 * 60
 
     /// When a conversation's over, it's heard again as a whole: the voices told apart across all
     /// of it at once (steadier than recording by recording, where a short snippet can be put
     /// down to the wrong person), and the words transcribed with all the context around them.
+    /// With Better Accuracy on, the words come from Parakeet (Apple's if that fails), and even a
+    /// conversation of one recording is heard again for them.
     /// It replaces the first transcript only if it's sound and nothing changed it meanwhile (you
     /// naming a voice or fixing a word), then misheard words are fixed again. The audio is
     /// deleted afterwards either way.
@@ -479,7 +483,8 @@ actor Pipeline {
                                                                      sortBy: [SortDescriptor(\.start)]))) ?? []
         let recordings = chunks.compactMap { chunk in chunk.path.map { (url: URL(fileURLWithPath: $0), recorded: chunk.start) } }
         let length = chunks.reduce(0.0) { $0 + $1.end.timeIntervalSince($1.start) }
-        guard chunks.count >= 2, recordings.count == chunks.count, length <= Self.hearAgainLimit,
+        let better = Parakeet.inUse, voicesOn = Self.voicesAgain
+        guard chunks.count >= (better ? 1 : 2), recordings.count == chunks.count, length <= Self.hearAgainLimit,
               recordings.allSatisfy({ FileManager.default.fileExists(atPath: $0.url.path) }) else { return }
         let before = c.transcript
         let started = Date()
@@ -487,15 +492,24 @@ actor Pipeline {
         defer { try? FileManager.default.removeItem(at: url) }
         guard let joined = Self.join(recordings, into: url) else { return }
         // Its own voice models, so recordings being made now aren't kept waiting behind it.
-        async let heardVoices = withDeadline(60 + joined.length) { await VoiceEngine.whole.split(url) }
-        let words = await withDeadline(30 + 1.5 * joined.length) { () -> [SpeakerAlign.Word]? in
+        async let heardVoices = Self.voices(in: url, length: joined.length, on: voicesOn)
+        // Parakeet's first load can take a while (the Neural Engine prepares it): more time for it.
+        let words = await withDeadline((better ? 60 : 30) + 1.5 * joined.length) { () -> [SpeakerAlign.Word]? in
+            if better {
+                do {
+                    let heard = try await Parakeet.shared.words(url)
+                    if !heard.isEmpty { return heard }
+                } catch {
+                    Log.error("Better Accuracy couldn't transcribe the conversation; using Apple's recogniser", error)
+                }
+            }
             do { return try await SpeechEngine.shared.words(url) } catch {
                 Log.error("Couldn't transcribe the whole conversation again", error)
                 return nil
             }
         }
         let split = await heardVoices
-        guard let words, !words.isEmpty, let split else {
+        guard let words, !words.isEmpty, split != nil || !voicesOn else {
             Log.info("Hearing the conversation again didn't finish, so it's kept as it was")
             return
         }
@@ -503,10 +517,12 @@ actor Pipeline {
             Log.info("The conversation changed while it was being heard again, so it's kept as it is")
             return
         }
+        // Without the voice models, every line's just "Speech", as it was.
         var heard: [Voiceprint] = []
-        let labels = VoiceMatcher.label(split.voices, heard: &heard, known: knownVoices())
-        let turns = split.turns.compactMap { t in labels[t.speaker].map { SpeakerAlign.Turn(start: t.start, end: t.end, speaker: $0) } }
-        let said = SpeakerAlign.assign(words, turns: turns, fallback: turns.first?.speaker ?? Labels.numbered(1))
+        let labels = split.map { VoiceMatcher.label($0.voices, heard: &heard, known: knownVoices()) } ?? [:]
+        let turns = split?.turns.compactMap { t in labels[t.speaker].map { SpeakerAlign.Turn(start: t.start, end: t.end, speaker: $0) } } ?? []
+        let fallback = split == nil ? Labels.anonymous : turns.first?.speaker ?? Labels.numbered(1)
+        let said = SpeakerAlign.assign(words, turns: turns, fallback: fallback)
         let utterances = said.compactMap { s -> Utterance? in
             let text = TranscriptFormat.clean(s.text)
             return text.isEmpty ? nil : Utterance(start: joined.time(at: s.start), speaker: s.speaker, text: text)
@@ -518,9 +534,9 @@ actor Pipeline {
         }
         let voicesBefore = Set(Labels.speakers(in: before)).count
         now.transcript = transcript
-        now.voiceprints = heard
+        if split != nil { now.voiceprints = heard }
         try? modelContext.save()
-        Log.info("Heard a \(Int(joined.length / 60)) min conversation again as a whole: \(Set(labels.values).count) voices (was \(voicesBefore)), \(String(format: "%.0f", Date().timeIntervalSince(started))) s")
+        Log.info("Heard a \(Int(joined.length / 60)) min conversation again as a whole\(better ? " (Better Accuracy)" : ""): \(Set(labels.values).count) voices (was \(voicesBefore)), \(String(format: "%.0f", Date().timeIntervalSince(started))) s")
         // Misheard words fixed again: the stretches with words the recogniser doubted.
         guard Brain.notReadyReason == nil else { return }
         let doubts = Doubts.of(words, limit: 60), protected = Doubts.protected(words)
@@ -533,6 +549,12 @@ actor Pipeline {
             let mentioned = doubts.filter { groupWords.contains($0.word) }
             _ = await correctMisheard(group, in: id, doubts: mentioned, protected: protected)
         }
+    }
+
+    /// Who spoke when in the whole conversation, if the voice models are on.
+    private static func voices(in url: URL, length: Double, on: Bool) async -> VoiceEngine.Split? {
+        guard on else { return nil }
+        return await withDeadline(60 + length) { await VoiceEngine.whole.split(url) }
     }
 
     /// Recordings joined into one file, with half a second between each.

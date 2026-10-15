@@ -5,7 +5,8 @@ tells voices apart, follows the conversation's topics, and tells you where you l
 Everything stays on the iPhone.
 
 - iOS 26, iPhone with Apple Intelligence (15 Pro or later).
-- Speech: Apple's SpeechAnalyzer, transcribed live as you talk.
+- Speech: Apple's SpeechAnalyzer, transcribed live as you talk (the dictation model on iPhones that can't run SpeechTranscriber).
+- Better Accuracy (optional, Settings): NVIDIA's [Parakeet TDT 0.6B v2](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2) (CC BY 4.0), via FluidAudio's Core ML port (about 440 MB, downloaded once), transcribes each finished conversation again. English only.
 - Voices: FluidAudio's Core ML ports of pyannote segmentation and WeSpeaker (22 MB, downloaded once).
 - AI: Apple's on-device model (Foundation Models) for summaries, list items, the thread map and answers.
 - Live Activity on the Lock Screen and Dynamic Island; "Hey Siri, WTF was I saying?" answers out loud.
