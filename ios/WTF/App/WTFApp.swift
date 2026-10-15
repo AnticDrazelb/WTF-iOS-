@@ -17,6 +17,7 @@ struct WTFApp: App {
                     // Carry on listening if it was on when the app last ran.
                     Log.info("App started (build \(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"))")
                     if !ListeningActivity.drawable { Log.error("WTF's widget extension isn't installed: no pill, Lock Screen card or controls") }
+                    Demo.prepare(model) // CI's Simulator screenshots only (-WTFDemo YES)
                     await model.tidyUp()
                     // A card left from before WTF was closed would still say "Recording".
                     if !model.recording { ListeningActivity.shared.stop() }

@@ -1,0 +1,81 @@
+name: Screenshots
+
+# Runs WTF in the iPhone Simulator with sample data (-WTFDemo YES) and screenshots each screen in
+# light, dark and large text, to check the look without a phone. Started by hand (Actions ›
+# Screenshots › Run workflow): Mac time costs 10x on GitHub's free allowance.
+on:
+  workflow_dispatch:
+
+jobs:
+  screenshots:
+    runs-on: macos-26-intel
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Xcode 26
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)"
+          xcodebuild -version
+
+      - name: Generate the Xcode project
+        working-directory: ios
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Build for the Simulator
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild -project WTF.xcodeproj -scheme WTF -configuration Debug \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO build 2>&1 | tee build.log | grep -E "error:|BUILD" || true
+          grep -q "\*\* BUILD SUCCEEDED \*\*" build.log || { grep -B2 -A6 "error:" build.log | head -200; exit 1; }
+
+      - name: Make an iPhone
+        id: sim
+        run: |
+          runtime=$(xcrun simctl list runtimes -j | python3 -c 'import json,sys; r=[x for x in json.load(sys.stdin)["runtimes"] if x["platform"]=="iOS" and x["isAvailable"]]; print(sorted(r,key=lambda x:[int(p) for p in x["version"].split(".")])[-1]["identifier"])')
+          device=$(xcrun simctl list devicetypes -j | python3 -c 'import json,sys; t=[d for d in json.load(sys.stdin)["devicetypes"] if d["name"].startswith("iPhone") and d["name"].endswith(" Pro")]; print(t[-1]["identifier"])')
+          echo "Runtime $runtime, device $device"
+          udid=$(xcrun simctl create shots "$device" "$runtime")
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
+          xcrun simctl install "$udid" ios/build/Build/Products/Debug-iphonesimulator/WTF.app
+          xcrun simctl status_bar "$udid" override --time 9:41 --batteryState charged --batteryLevel 100 --wifiBars 3 --cellularBars 4
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+
+      - name: Screenshot every screen
+        env:
+          UDID: ${{ steps.sim.outputs.udid }}
+        run: |
+          mkdir -p shots
+          shoot() { # name, appearance, text size, extra launch arguments...
+            local name=$1 look=$2 size=$3; shift 3
+            xcrun simctl ui "$UDID" appearance "$look"
+            xcrun simctl ui "$UDID" content_size "$size"
+            xcrun simctl terminate "$UDID" com.wtf.ios 2>/dev/null || true
+            xcrun simctl launch "$UDID" com.wtf.ios -WTFDemo YES "$@"
+            sleep 8
+            xcrun simctl io "$UDID" screenshot "shots/$name.png"
+          }
+          for look in light dark; do
+            for screen in ask timeline conversation lists settings; do
+              shoot "$screen-$look" "$look" large -welcomed YES -WTFScreen "$screen"
+            done
+          done
+          for screen in ask timeline conversation lists settings; do
+            shoot "$screen-largetext" dark accessibility-extra-large -welcomed YES -WTFScreen "$screen"
+          done
+          # First run: the welcome sheet.
+          xcrun simctl terminate "$UDID" com.wtf.ios 2>/dev/null || true
+          xcrun simctl uninstall "$UDID" com.wtf.ios
+          xcrun simctl install "$UDID" ios/build/Build/Products/Debug-iphonesimulator/WTF.app
+          shoot "welcome-dark" dark large
+          ls -la shots
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: shots
