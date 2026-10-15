@@ -1,0 +1,72 @@
+name: Build iPhone app
+
+# Mac build time costs 10x on GitHub's free allowance, so only when the iPhone app changes.
+on:
+  push:
+    branches: [main]
+    paths: ['ios/**', '.github/workflows/ios.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # The Intel Macs: GitHub's Apple-silicon ones (macos-26) stopped picking up builds for this
+    # repo (left queued, then cancelled). Same macOS 26 and Xcode; iPhone builds are the same.
+    runs-on: macos-26-intel
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Xcode 26
+        run: |
+          ls -d /Applications/Xcode*.app
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)"
+          xcodebuild -version
+
+      - name: Core tests (dates, list rules, recap)
+        working-directory: ios/WTFCore
+        run: swift test
+
+      - name: Generate the Xcode project
+        working-directory: ios
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Build (unsigned; AltStore or SideStore signs it on install)
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild -project WTF.xcodeproj -scheme WTF -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} build 2>&1 | tee build.log | grep -E "error:|warning: .*deprecated|BUILD" || true
+          # A failed build can still leave a half-built app behind: only a clean success counts.
+          grep -q "\*\* BUILD SUCCEEDED \*\*" build.log && test -d build/Build/Products/Release-iphoneos/WTF.app \
+            || { grep -B2 -A6 "error:" build.log | head -200; exit 1; }
+          # And it must have its parts: the app itself and the Lock Screen widget.
+          test -f build/Build/Products/Release-iphoneos/WTF.app/WTF
+          test -d build/Build/Products/Release-iphoneos/WTF.app/PlugIns/WTFWidgets.appex
+
+      - name: Package the IPA
+        id: ipa
+        run: |
+          name="WTF-iOS-build${{ github.run_number }}.ipa"
+          mkdir Payload
+          cp -R ios/build/Build/Products/Release-iphoneos/WTF.app Payload/
+          zip -qry "$name" Payload
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ios-build-${{ github.run_number }}
+          name: WTF for iPhone (build ${{ github.run_number }})
+          make_latest: false
+          files: ${{ steps.ipa.outputs.name }}
+          body: |
+            iPhone app for testing (iOS 26, built for iPhone 15 Pro and newer for Apple Intelligence).
+            Unsigned: install it with AltStore or SideStore, which sign it with your Apple ID (refresh every 7 days).
+            Built from ${{ github.sha }}.

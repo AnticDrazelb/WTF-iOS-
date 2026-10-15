@@ -1,0 +1,6 @@
+ios/WTF.xcodeproj/
+ios/build/
+ios/WTFCore/.build/
+ios/WTF/Info.plist
+ios/WTFWidgets/Info.plist
+.DS_Store
