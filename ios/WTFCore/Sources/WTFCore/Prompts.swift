@@ -116,14 +116,40 @@ public enum Prompts {
     }
 
     /// Any other question: titles and summaries of the day, plus the best-matching transcript.
-    public static func focused(question: String, notes: [(label: String, title: String?, summary: String?)], best: (label: String, transcript: String)?, now: Date, background: String = "") -> String {
-        var body = background + (notes.count == 1 ? "The conversation:\n" : "Conversations recorded on my phone:\n")
-        for n in notes.prefix(12) {
-            body += "- \(n.label): \(n.title ?? "untitled")" + (n.summary.map { "\n  " + $0.replacingOccurrences(of: "\n", with: "\n  ") } ?? "") + "\n"
-        }
-        if let best { body += "\nFrom the transcript of \(best.label):\n" + tail(TranscriptFormat.compact(best.transcript), budget: background.isEmpty ? 1_600 : 1_300) + "\n" }
+    /// Held to [budget] tokens in all (the model's 4,096 also hold its instructions and the
+    /// answer): the transcript first, then as many conversations' notes as fit, newest first,
+    /// with just the title once the summaries no longer fit.
+    public static func focused(question: String, notes: [(label: String, title: String?, summary: String?)], best: (label: String, transcript: String)?,
+                               now: Date, background: String = "", budget: Int = 2_800) -> String {
         let which = notes.count > 1 ? ", saying which conversation (its time) you mean" : ""
-        return body + "\n(It's \(clock(now)) now.) Answer my question in 2 to 4 short sentences\(which).\nMy question: \(question)"
+        let ending = "\n(It's \(clock(now)) now.) Answer my question in 2 to 4 short sentences\(which).\nMy question: \(question)"
+        // The background's already short (see Understanding.background), but it counts.
+        var context = background
+        if tokens(context) > budget / 3 { context = String(context.prefix(budget / 3 * 4)) + "\n\n" }
+        let header = notes.count == 1 ? "The conversation:\n" : "Conversations recorded on my phone:\n"
+        var left = budget - tokens(context) - tokens(header) - tokens(ending)
+        var transcript = ""
+        if let best {
+            // Room kept for at least a few conversations' notes.
+            let room = min(context.isEmpty ? 1_600 : 1_300, max(150, left - (notes.count > 1 ? 450 : 150)))
+            transcript = "\nFrom the transcript of \(best.label):\n" + tail(TranscriptFormat.compact(best.transcript), budget: room) + "\n"
+            left -= tokens(transcript)
+        }
+        var listed = ""
+        for n in notes.prefix(12) {
+            let titled = "- \(n.label): \(n.title ?? "untitled")"
+            let full = titled + (n.summary.map { "\n  " + $0.replacingOccurrences(of: "\n", with: "\n  ") } ?? "") + "\n"
+            if tokens(full) <= left {
+                listed += full
+                left -= tokens(full)
+            } else if tokens(titled) + 1 <= left {
+                listed += titled + "\n"
+                left -= tokens(titled) + 1
+            } else {
+                break
+            }
+        }
+        return context + header + listed + transcript + ending
     }
 
     /// An answer as the user should see (or hear) it: without the lead-in small models add

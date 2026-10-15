@@ -180,6 +180,13 @@ enum Brain {
         }
     }
 
+    /// The prompt didn't fit in the model's context (its 4,096 tokens): worth trying again with less.
+    static func isTooLong(_ error: Error) -> Bool {
+        guard let failure = error as? LanguageModelSession.GenerationError else { return false }
+        if case .exceededContextWindowSize = failure { return true }
+        return false
+    }
+
     /// The answer as it's written, each element the whole answer so far.
     static func ask(_ prompt: String) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in

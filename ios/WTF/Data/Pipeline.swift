@@ -55,6 +55,9 @@ actor Pipeline {
         try? modelContext.save()
     }
 
+    /// A chunk deleted while its transcription was waiting on something (see cutOff).
+    private func gone(_ chunk: Chunk) -> Bool { chunk.isDeleted || chunk.modelContext == nil }
+
     /// Transcribes what's waiting, so a question includes the latest words. Summaries can wait.
     @discardableResult
     func catchUp() async -> Bool {
@@ -88,11 +91,14 @@ actor Pipeline {
                 var isSong = false
                 if length >= 6 { isSong = await withDeadline(5 + length / 4, { await MusicCheck.isSong(url) }) == true }
                 guard wiped == generation else { return false }
+                if gone(chunk) { continue }
+                // The times copied first: the chunk itself belongs to this actor, not the closures.
+                let (from, to) = (chunk.start, chunk.end)
                 if isSong {
                     Log.info("Recording \(chunk.start.formatted(date: .omitted, time: .standard)) (\(Int(length)) s) was music, so it wasn't transcribed")
-                    let (from, to) = (chunk.start, chunk.end)
                     _ = await withDeadline(4) { await LiveTranscriber.shared.words(from: from, to: to) }
                     guard wiped == generation else { return false }
+                    if gone(chunk) { continue }
                     chunk.status = "music"
                     chunk.path = nil
                     try? FileManager.default.removeItem(atPath: path)
@@ -101,7 +107,7 @@ actor Pipeline {
                 }
                 async let heardVoices = withDeadline(60 + length) { await VoiceEngine.shared.split(url) }
                 // Usually the words were heard live already; if not, from the file.
-                var words = await withDeadline(4) { await LiveTranscriber.shared.words(from: chunk.start, to: chunk.end) }
+                var words = await withDeadline(4) { await LiveTranscriber.shared.words(from: from, to: to) }
                 let live = words != nil
                 if words == nil {
                     words = await withDeadline(20 + 2 * length) { () -> [SpeakerAlign.Word]? in
@@ -113,6 +119,8 @@ actor Pipeline {
                 }
                 let split = await heardVoices
                 guard wiped == generation else { return false }
+                // Deleted meanwhile (the conversation it was part of was deleted): nothing to write to.
+                if gone(chunk) { continue }
                 guard let words else { throw StepTimedOut(what: "transcribing \(Int(length)) s of audio") }
                 Log.info("Recording \(chunk.start.formatted(date: .omitted, time: .standard)) (\(Int(length)) s): \(words.count) words \(live ? "live" : "from the file") (\(Doubts.summary(words))), \(split?.voices.count ?? 0) voices, \(String(format: "%.1f", Date().timeIntervalSince(started))) s")
                 let target = openConversation(for: chunk)
@@ -143,6 +151,7 @@ actor Pipeline {
                 }
             } catch {
                 guard wiped == generation else { return false }
+                if gone(chunk) { continue }
                 Log.error("Couldn't transcribe the recording from \(chunk.start.formatted(date: .omitted, time: .standard)) (try \(chunk.attempts + 1) of 5)", error)
                 chunk.attempts += 1
                 if chunk.attempts >= 5 {
@@ -181,10 +190,21 @@ actor Pipeline {
             await summarise(id)
         }
         guard wiped == generation else { return }
+        // Summarised, but WTF was closed before its facts and list items were looked for.
+        let unfinished = ((try? modelContext.fetch(FetchDescriptor<Conversation>(
+            predicate: #Predicate { $0.summary != nil }))) ?? []).filter { $0.extracted == false }.map(\.id)
+        for id in unfinished where Brain.notReadyReason == nil {
+            guard wiped == generation else { return }
+            await extract(id)
+        }
+        guard wiped == generation else { return }
         // Old recordings' records go here; old conversations go in the app (AppModel.expireOld),
         // where the screens' copies are, so none is left pointing at one that's gone.
         let cutoff = Date().addingTimeInterval(-Double(keepDays) * 86_400)
         try? modelContext.delete(model: Chunk.self, where: #Predicate { $0.end < cutoff })
+        // Ticked-off and turned-down list items are kept a while (so they aren't suggested again
+        // from the same talk), then go with the conversations they came from.
+        try? modelContext.delete(model: ActionItem.self, where: #Predicate { ($0.status == "done" || $0.status == "dismissed") && $0.created < cutoff })
         try? modelContext.save()
     }
 
@@ -259,22 +279,15 @@ actor Pipeline {
     /// The transcript lines said while [thread] was the topic.
     func lines(of thread: TopicThread, in id: UUID) -> String {
         guard let c = (try? modelContext.fetch(FetchDescriptor<Conversation>(predicate: #Predicate { $0.id == id })))?.first else { return "" }
-        let cal = Calendar.current
-        func secondOfDay(_ d: Date) -> Int { let x = cal.dateComponents([.hour, .minute, .second], from: d); return x.hour! * 3600 + x.minute! * 60 + x.second! }
-        let from = secondOfDay(thread.start), to = secondOfDay(thread.end) + 1
-        func at(_ line: Substring) -> Int? {
-            guard line.count > 9, line.hasPrefix("["), let h = Int(line.dropFirst(1).prefix(2)), let m = Int(line.dropFirst(4).prefix(2)),
-                  let s = Int(line.dropFirst(7).prefix(2)) else { return nil }
-            return h * 3600 + m * 60 + s
-        }
         // A line covers everything until the next one starts, so a topic that began part-way
-        // through a long line includes that line.
+        // through a long line includes that line. By date, not time of day: a topic can run past midnight.
         let lines = c.transcript.split(separator: "\n")
-        let starts = lines.map(at)
+        let starts = TranscriptFormat.times(of: lines, from: c.start)
+        let from = thread.start, to = thread.end.addingTimeInterval(1)
         var kept: [Substring] = []
         for (i, line) in lines.enumerated() {
             guard let t = starts[i] else { continue }
-            let next = starts[(i + 1)...].compactMap { $0 }.first ?? Int.max
+            let next = starts[(i + 1)...].compactMap { $0 }.first ?? .distantFuture
             if t < to && next > from { kept.append(line) }
         }
         return kept.joined(separator: "\n")
@@ -671,25 +684,41 @@ actor Pipeline {
         return "\(f.string(from: c.start))–\(e.string(from: c.end))"
     }
 
-    /// The conversation a recording carries on, if it's soon enough after the last one.
+    /// The conversation a recording carries on, if it's soon enough after the last one. A
+    /// recording transcribed late (a retry, after newer ones) goes back into the conversation it
+    /// was said in, if there is one, rather than onto the end of the latest.
     private func openConversation(for chunk: Chunk) -> Conversation? {
+        let gap = Double(gapMinutes) * 60
         var d = FetchDescriptor<Conversation>(sortBy: [SortDescriptor(\.end, order: .reverse)])
         d.fetchLimit = 1
-        guard let latest = (try? modelContext.fetch(d))?.first, !latest.closed,
-              chunk.start.timeIntervalSince(latest.end) <= Double(gapMinutes) * 60 else { return nil }
-        return latest
+        guard let latest = (try? modelContext.fetch(d))?.first else { return nil }
+        if chunk.start >= latest.end {
+            guard !latest.closed, chunk.start.timeIntervalSince(latest.end) <= gap else { return nil }
+            return latest
+        }
+        let (from, to) = (chunk.start.addingTimeInterval(-gap), chunk.end.addingTimeInterval(gap))
+        let around = (try? modelContext.fetch(FetchDescriptor<Conversation>(predicate: #Predicate { $0.start <= to && $0.end >= from }))) ?? []
+        func distance(_ c: Conversation) -> TimeInterval {
+            chunk.start < c.start ? c.start.timeIntervalSince(chunk.start) : max(0, chunk.start.timeIntervalSince(c.end))
+        }
+        return around.min { distance($0) < distance($1) }
     }
 
     private func attach(_ chunk: Chunk, text: String, to open: Conversation?) -> Conversation {
         if let open {
-            open.transcript += "\n" + text
+            open.transcript = TranscriptFormat.insert(text, at: chunk.start, into: open.transcript, from: open.start)
+            open.start = min(open.start, chunk.start)
             open.end = max(open.end, chunk.end)
             return open
         }
         var d = FetchDescriptor<Conversation>(sortBy: [SortDescriptor(\.end, order: .reverse)])
         d.fetchLimit = 1
-        if let latest = (try? modelContext.fetch(d))?.first { latest.closed = true }
+        // A new conversation ends the one before, unless this recording's older than it (a late
+        // retry with nothing around it): then it's a conversation of its own, in the past.
+        if let latest = (try? modelContext.fetch(d))?.first, chunk.start >= latest.end { latest.closed = true }
         let c = Conversation(start: chunk.start, end: chunk.end, transcript: text)
+        let end = chunk.end
+        if ((try? modelContext.fetchCount(FetchDescriptor<Conversation>(predicate: #Predicate { $0.end > end }))) ?? 0) > 0 { c.closed = true }
         modelContext.insert(c)
         return c
     }
@@ -831,8 +860,22 @@ actor Pipeline {
         guard let c = conversation(id) else { return }
         c.title = written.title
         c.summary = written.points.map { "\u{2022} " + $0 }.joined(separator: "\n")
+        c.extracted = false
         try? modelContext.save()
+        await extract(id)
+    }
+
+    /// A summarised conversation's lasting facts and list items. Marked done only once both have
+    /// been looked for, so WTF closed part-way through looks again on the next run.
+    private func extract(_ id: UUID) async {
         await learnFacts(from: id)
+        await findListItems(in: id)
+        guard let c = conversation(id) else { return }
+        c.extracted = true
+        try? modelContext.save()
+    }
+
+    private func findListItems(in id: UUID) async {
         guard let c = conversation(id) else { return }
         let lines = ActionRules.candidateLines(c.transcript)
         guard !lines.isEmpty else { return }

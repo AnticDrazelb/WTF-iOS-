@@ -77,6 +77,10 @@ actor SpeechEngine {
         return timed
     }
 
+    /// Whether this iPhone can transcribe speech on the device at all: the App Store offers WTF to
+    /// every iPhone with iOS 26, but Apple's on-device transcriber doesn't run on all of them.
+    nonisolated static var deviceCanTranscribe: Bool { SpeechTranscriber.isAvailable }
+
     /// Whether the speech model for this language is on the phone.
     func isReady() async -> Bool {
         let t = await makeTranscriber()

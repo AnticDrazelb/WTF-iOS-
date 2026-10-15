@@ -66,7 +66,6 @@ final class AppModel {
         let pipeline = pipeline
         Recorder.shared.onChunk = { url, start, end in
             Task { @MainActor in
-                AppModel.shared.heardSomething(true)
                 // Keep Transcripts applies while WTF listens in the background too, not only on opening.
                 if Date().timeIntervalSince(AppModel.shared.lastExpiry) > 3600 {
                     AppModel.shared.lastExpiry = Date()
@@ -76,6 +75,11 @@ final class AppModel {
             Task {
                 await pipeline.addChunk(url: url, start: start, end: end)
                 await pipeline.run()
+                // Only once it's in a conversation: a recording that turns out to be music isn't
+                // anything to answer "what was I saying?" from.
+                if await pipeline.conversationCount() > 0 {
+                    await MainActor.run { AppModel.shared.heardSomething(true) }
+                }
                 await Standby.shared.refresh()
             }
         }
@@ -155,6 +159,11 @@ final class AppModel {
 
     private func startListeningNow() async -> Bool {
         if recording && Recorder.shared.running { return true }
+        guard SpeechEngine.deviceCanTranscribe else {
+            Log.error("This iPhone can't transcribe speech on the device")
+            problem = "This iPhone can\u{2019}t turn speech into text on the device, which WTF needs to listen. Apple\u{2019}s on-device transcription isn\u{2019}t available on every iPhone that runs iOS 26."
+            return false
+        }
         guard await AVPermissions.microphone() else {
             problem = "WTF needs the microphone: Settings › Privacy & Security › Microphone."
             return false
@@ -269,14 +278,48 @@ final class AppModel {
         }
     }
 
+    /// A tap on the listening pill: the sheet to stop. If WTF had been closed (or crashed), the
+    /// pill is one left from before and listening's coming back as WTF opens: the sheet shows once
+    /// it has, rather than the tap being lost and listening carrying on with no way to stop shown.
+    func openedFromPill() {
+        if recording {
+            stopSheet = true
+            return
+        }
+        guard UserDefaults.standard.bool(forKey: "listening") else { return }
+        let stopsBefore = stops
+        Task {
+            guard await startListening(), recording, stops == stopsBefore else { return }
+            stopSheet = true
+        }
+    }
+
     func processNow() {
         Task { await pipeline.run() }
     }
 
-    /// A question or answer in Ask, kept.
+    /// A question or answer in Ask, kept. While a question's being answered, its answers are
+    /// tagged with what it drew on as they're added, so deleting one of those conversations
+    /// mid-answer takes them too; and once the question itself has gone (deleted, or Delete All),
+    /// what was still to come of its answer isn't added at all.
     func add(_ message: ChatMessage) {
+        var message = message
+        if let asking, !message.fromUser, message.id != asking.question {
+            guard messages.contains(where: { $0.id == asking.question }) else { return }
+            if message.about == nil, !asking.about.isEmpty { message.about = Array(asking.about) }
+        }
         messages.append(message)
         ChatLog.save(messages)
+    }
+
+    /// The question being answered now, and the conversations its answer draws on so far.
+    @ObservationIgnored private var asking: (question: UUID, about: Set<UUID>)?
+
+    /// The answer to [question] draws on [about]: the question and what's been said so far are
+    /// tagged straight away, not only once it's finished.
+    private func drawsOn(_ about: Set<UUID>, question: UUID) {
+        asking = (question, about)
+        tag(from: question, about: about)
     }
 
     /// Settings › Delete All Recordings: everything heard, and everything asked and written about it.
@@ -375,7 +418,13 @@ final class AppModel {
     /// at all, nothing Ask said can stand, so all of it goes.
     func forgetAsked(about ids: Set<UUID>) {
         Standby.shared.forget()
-        messages.removeAll { m in (m.about ?? []).contains { ids.contains($0) } }
+        // What drew on them goes, and with a question that goes, the answers that followed it.
+        var dropping = false
+        messages.removeAll { m in
+            let gone = (m.about ?? []).contains { ids.contains($0) }
+            if m.fromUser { dropping = gone } else if dropping { return true }
+            return gone
+        }
         if (try? container.mainContext.fetchCount(FetchDescriptor<Conversation>())) == 0 { messages = [] }
         ChatLog.save(messages)
     }
@@ -408,10 +457,11 @@ final class AppModel {
         add(asked)
         Brain.prewarm()
         status = "Catching up on the last few seconds\u{2026}"
+        drawsOn(Set(focus.map { [$0] } ?? []), question: asked.id)
         Task {
             // The conversations the answer draws on: deleting one deletes the question and answer too.
             var about = Set(focus.map { [$0] } ?? [])
-            defer { status = nil; streaming = nil; tag(from: asked.id, about: about) }
+            defer { status = nil; streaming = nil; tag(from: asked.id, about: about); asking = nil }
             // Close the chunk being recorded and transcribe it, so "just now" includes it (30 s at most).
             Recorder.shared.flush()
             let pipeline = pipeline
@@ -432,6 +482,7 @@ final class AppModel {
                 let notes = all.filter { $0.title != nil && $0.title != "" }.map(\.dayNote)
                 if !notes.isEmpty, let recap = await DayDigests.shared.recap(for: today, notes: notes) {
                     about.formUnion(all.map(\.id))
+                    drawsOn(about, question: asked.id)
                     add(ChatMessage(fromUser: false, text: recap))
                     return
                 }
@@ -443,6 +494,7 @@ final class AppModel {
                     return
                 }
                 about.insert(latest.id)
+                drawsOn(about, question: asked.id)
                 // Word for word, straight away; the AI's gist follows.
                 if let recap = QuickRecap.of(latest.transcript, start: latest.start, now: now) {
                     add(ChatMessage(fromUser: false, text: recap))
@@ -458,11 +510,13 @@ final class AppModel {
             }
             let found = await pipeline.notes(for: q, focus: focus)
             about.formUnion(found.used)
+            drawsOn(about, question: asked.id)
             guard !found.notes.isEmpty else {
                 add(ChatMessage(fromUser: false, text: recording ? "I haven't heard anything yet. Keep talking and I'll keep track." : "I haven't heard anything yet. Turn on listening and I'll keep track."))
                 return
             }
-            await answer(Prompts.focused(question: q, notes: found.notes, best: found.best, now: now, background: found.background))
+            await answer(Prompts.focused(question: q, notes: found.notes, best: found.best, now: now, background: found.background),
+                         smaller: Prompts.focused(question: q, notes: found.notes, best: found.best, now: now, background: found.background, budget: 1_800))
         }
     }
 
@@ -484,6 +538,8 @@ final class AppModel {
     /// card's, a control's): it shows on the card and the pill while listening, or as a
     /// notification if not. It's in Ask too, and read out if headphones are in.
     func showAnswer(_ answer: String) {
+        // The card may have been ended by iOS (after about 8 hours) or swiped away: back it comes.
+        ListeningActivity.shared.restoreIfNeeded()
         if ListeningActivity.shared.showing {
             ListeningActivity.shared.showAnswer(answer)
             return
@@ -635,8 +691,9 @@ final class AppModel {
         let asked = ChatMessage(fromUser: true, text: "Where was I with \u{201C}\(thread.title)\u{201D}?")
         add(asked)
         status = "Looking back\u{2026}"
+        drawsOn([conversation], question: asked.id)
         Task {
-            defer { status = nil; streaming = nil; tag(from: asked.id, about: [conversation]) }
+            defer { status = nil; streaming = nil; asking = nil }
             let lines = await pipeline.lines(of: thread, in: conversation)
             guard !lines.isEmpty else {
                 add(ChatMessage(fromUser: false, text: "I can't find what was said about that."))
@@ -653,7 +710,9 @@ final class AppModel {
         }
     }
 
-    private func answer(_ prompt: String) async {
+    /// [smaller]: the same with less of what was heard in it, tried if [prompt] doesn't fit in
+    /// Apple Intelligence's context (the token count is only an estimate).
+    private func answer(_ prompt: String, smaller: String? = nil) async {
         status = "Thinking\u{2026}"
         // Written in a task of its own, given up on after a minute: Apple's AI can stall, and
         // Ask would be stuck on "Thinking…" until WTF was closed.
@@ -674,6 +733,11 @@ final class AppModel {
         limit.cancel()
         streaming = nil
         if let failure { Log.error("Apple Intelligence couldn't answer", failure) }
+        if let failure, let smaller, text.isEmpty, Brain.isTooLong(failure) {
+            Log.info("The question's notes were too long for Apple Intelligence; trying again with less")
+            await answer(smaller)
+            return
+        }
         if !text.isEmpty {
             add(ChatMessage(fromUser: false, text: text))
         } else if failure == nil && !writing.isCancelled {

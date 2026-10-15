@@ -84,3 +84,54 @@ final class ListsAndAnswersTests: XCTestCase {
         XCTAssertFalse(one.contains("which conversation"))
     }
 }
+
+final class TranscriptOrderTests: XCTestCase {
+    let cal: Calendar = { var c = Calendar(identifier: .gregorian); c.timeZone = TimeZone(identifier: "UTC")!; return c }()
+    func at(_ day: Int, _ h: Int, _ m: Int, _ s: Int = 0) -> Date {
+        cal.date(from: DateComponents(year: 2026, month: 10, day: day, hour: h, minute: m, second: s))!
+    }
+
+    func testNewLinesGoOnTheEnd() {
+        let t = "[10:00:00] You: one\n[10:01:00] You: two"
+        XCTAssertEqual(TranscriptFormat.insert("[10:02:00] You: three", at: at(11, 10, 2), into: t, from: at(11, 10, 0), calendar: cal),
+                       t + "\n[10:02:00] You: three")
+    }
+
+    func testARetriedRecordingGoesBackWhereItWasSaid() {
+        let t = "[10:00:00] You: one\n[10:05:00] You: three"
+        XCTAssertEqual(TranscriptFormat.insert("[10:02:00] You: two", at: at(11, 10, 2), into: t, from: at(11, 10, 0), calendar: cal),
+                       "[10:00:00] You: one\n[10:02:00] You: two\n[10:05:00] You: three")
+    }
+
+    func testPastMidnight() {
+        let t = "[23:58:00] You: late\n[00:03:00] You: later"
+        let times = TranscriptFormat.times(of: t.split(separator: "\n"), from: at(11, 23, 58), calendar: cal)
+        XCTAssertEqual(times, [at(11, 23, 58), at(12, 0, 3)])
+        XCTAssertEqual(TranscriptFormat.insert("[00:01:00] You: middle", at: at(12, 0, 1), into: t, from: at(11, 23, 58), calendar: cal),
+                       "[23:58:00] You: late\n[00:01:00] You: middle\n[00:03:00] You: later")
+    }
+
+    func testCompactKeepsGapMarkers() {
+        let t = "[10:00:00] You: one\n(\u{2026})\n[10:30:00] You: two"
+        XCTAssertEqual(TranscriptFormat.compact(t), "You: one\n(\u{2026})\nYou: two")
+        let plain = "[10:00:00] Speech: one\n(\u{2026})\n[10:30:00] Speech: two"
+        XCTAssertEqual(TranscriptFormat.compact(plain), "one\n(\u{2026})\ntwo")
+    }
+}
+
+final class FocusedBudgetTests: XCTestCase {
+    func testAGeneralQuestionStaysWithinItsBudget() {
+        let summary = Array(repeating: "\u{2022} A long point about what was said, who said it and what was decided about it.", count: 8).joined(separator: "\n")
+        let notes = (0..<12).map { (label: "Today \(10 + $0):00", title: Optional("Conversation \($0)"), summary: Optional(summary)) }
+        let transcript = (0..<300).map { "[10:\(String(format: "%02d", $0 % 60)):00] You: and then we talked about the garage and the dentist again" }.joined(separator: "\n")
+        let background = "Things I know from other days:\n" + (0..<5).map { "- Fact number \($0) about someone's birthday and where they live" }.joined(separator: "\n") + "\n\n"
+        for budget in [2_800, 1_800] {
+            let prompt = Prompts.focused(question: "What did we decide about the garage?", notes: notes, best: ("Today 10:00", transcript),
+                                         now: Date(), background: background, budget: budget)
+            XCTAssertLessThanOrEqual(Prompts.tokens(prompt), budget + 20, "budget \(budget)")
+            XCTAssertTrue(prompt.contains("From the transcript of Today 10:00"))
+            XCTAssertTrue(prompt.contains("- Today 10:00: Conversation 0"))
+            XCTAssertTrue(prompt.hasSuffix("My question: What did we decide about the garage?"))
+        }
+    }
+}

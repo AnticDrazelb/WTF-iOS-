@@ -43,13 +43,17 @@ struct SettingsView: View {
 
                 Section("On This iPhone") {
                     LabeledContent("Speech Recognition") {
-                        if downloading { ProgressView() }
+                        if !SpeechEngine.deviceCanTranscribe { Text("Not available").foregroundStyle(.orange) }
+                        else if downloading { ProgressView() }
                         else if speechReady == true { Text("Ready").foregroundStyle(.green) }
                         else if speechReady == false { Button("Download") { download() } }
                         else { ProgressView() }
                     }
                     LabeledContent("Apple Intelligence") {
                         Text(Brain.notReadyReason == nil ? "Ready" : "Not available").foregroundStyle(Brain.notReadyReason == nil ? .green : .orange)
+                    }
+                    if !SpeechEngine.deviceCanTranscribe {
+                        Text("This iPhone can\u{2019}t turn speech into text on the device, so WTF can\u{2019}t listen on it.").font(.footnote).foregroundStyle(.secondary)
                     }
                     if let speechProblem { Text(speechProblem).font(.footnote).foregroundStyle(.red) }
                     if let why = Brain.notReadyReason { Text(why).font(.footnote).foregroundStyle(.secondary) }

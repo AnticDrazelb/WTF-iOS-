@@ -28,12 +28,13 @@ struct WTFApp: App {
                 // holding it shows the Pause button without opening anything).
                 .onOpenURL { url in
                     if url.host == "ask" { model.askFromShortcut() }
-                    if url.host == "listening", model.recording { model.stopSheet = true }
+                    if url.host == "listening" { model.openedFromPill() }
                 }
         }
         .onChange(of: phase) { _, now in
             if now == .active {
                 model.resumeIfNeeded()
+                ListeningActivity.shared.restoreIfNeeded()
                 model.processNow()
                 Task { await model.expireOld() }
             }

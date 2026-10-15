@@ -62,11 +62,12 @@ struct CardBody: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let answer = state.answer {
+                // Four smaller lines: enough for a spoken recap, within iOS's 160 points.
                 Text(answer)
-                    .font(.subheadline)
+                    .font(.footnote)
                     .foregroundStyle(.white)
                     .lineLimit(4)
-                    .minimumScaleFactor(0.75)
+                    .minimumScaleFactor(0.8)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 HStack(spacing: 8) {
                     if state.earlier {
@@ -167,7 +168,12 @@ struct ListeningLiveActivity: Widget {
                     Elapsed(since: s.since, font: .caption).frame(width: 56, alignment: .trailing)
                 }
                 DynamicIslandExpandedRegion(.center) {
-                    Text(context.isStale ? "Not recording" : s.answer == nil ? (s.topic ?? "") : "").font(.headline).lineLimit(1)
+                    // With an answer showing, the topic gives it its line: no empty line left either.
+                    if context.isStale {
+                        Text("Not recording").font(.headline).lineLimit(1)
+                    } else if s.answer == nil, let topic = s.topic {
+                        Text(topic).font(.headline).lineLimit(1)
+                    }
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     CardBody(state: s, inIsland: true).padding(.top, 2)
@@ -228,16 +234,20 @@ struct LockScreenCard: View {
             }
             .padding(8)
         } else {
-            VStack(alignment: .leading, spacing: 10) {
+            // Kept under iOS's 160 points: heading, then the trail and the buttons, or an answer
+            // (which takes the topic's place) and its two small buttons.
+            VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
                     RecordingDot()
-                    Text(state.topic ?? "Recording").font(.headline).foregroundStyle(.white).lineLimit(1)
+                    if state.answer == nil {
+                        Text(state.topic ?? "Recording").font(.headline).foregroundStyle(.white).lineLimit(1)
+                    }
                     Spacer()
                     Elapsed(since: state.since, font: .subheadline).frame(width: 72, alignment: .trailing)
                 }
                 CardBody(state: state)
             }
-            .padding(14)
+            .padding(12)
         }
     }
 }

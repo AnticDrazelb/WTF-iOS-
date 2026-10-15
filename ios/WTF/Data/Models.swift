@@ -60,6 +60,11 @@ final class Conversation {
     /// Words you fixed in it yourself ([LearnedFix] as JSON).
     var fixData: Data?
 
+    /// Its lasting facts and list items have been looked for since its summary was written: false
+    /// in between, so if WTF's closed then, they're looked for on the next run. Nil for
+    /// conversations summarised before this was kept (they were looked for then).
+    var extracted: Bool?
+
     var fixes: [LearnedFix] {
         get { fixData.flatMap { try? JSONDecoder().decode([LearnedFix].self, from: $0) } ?? [] }
         set { fixData = try? JSONEncoder().encode(newValue) }

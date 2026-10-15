@@ -28,15 +28,48 @@ final class ListeningActivity {
     private var state = ListeningAttributes.ContentState(topic: nil, trail: [], since: Date(), hanging: 0)
 
     /// Whether the card and the pill are up (they're where a press of their buttons is answered).
-    var showing: Bool { activity?.activityState == .active }
+    /// iOS ends them after about 8 hours, and they can be swiped away: then there's a stale handle
+    /// to one that's gone.
+    var showing: Bool {
+        guard let activity else { return false }
+        return activity.activityState == .active || activity.activityState == .stale
+    }
 
+    /// A new card for a new listening session: no topics yet.
     func start() {
-        guard activity == nil, Self.allowed else { return }
-        // Any left from before (WTF closed while it was listening) would show as a second pill.
+        guard !showing, Self.allowed else { return }
+        state = ListeningAttributes.ContentState(topic: nil, trail: [], since: Date(), hanging: 0, heard: AppModel.shared.hasHeard)
+        request()
+    }
+
+    /// While listening, the card back if iOS ended it or it was swiped away: with the topics it
+    /// had and the time listening started, so its timer carries on rather than starting again.
+    /// From the app coming forward, and from the card's and the controls' buttons before answering.
+    /// [often]: from new topics, which come all the time, so a try at most once a minute.
+    func restoreIfNeeded(often: Bool = false) {
+        guard AppModel.shared.recording, !showing, Self.allowed else { return }
+        // iOS only lets a card start from the app in front (or a button's intent): from the
+        // background it says no, so not every new topic tries again.
+        if often {
+            guard Date().timeIntervalSince(lastRestore) > 60 else { return }
+            lastRestore = Date()
+        }
+        state.since = AppModel.shared.listeningSince ?? state.since
+        state.answer = nil
+        state.heard = AppModel.shared.hasHeard
+        Log.info("Lock Screen card had ended while listening; starting it again")
+        request()
+    }
+
+    private var lastRestore = Date.distantPast
+
+    private func request() {
+        activity = nil
+        // Any left from before (WTF closed while it was listening, or one iOS ended) would show
+        // as a second pill.
         for old in Activity<ListeningAttributes>.activities {
             Task { await old.end(nil, dismissalPolicy: .immediate) }
         }
-        state = ListeningAttributes.ContentState(topic: nil, trail: [], since: Date(), hanging: 0, heard: AppModel.shared.hasHeard)
         do {
             activity = try Activity.request(attributes: ListeningAttributes(), content: ActivityContent(state: state, staleDate: Self.fresh))
             heartbeat?.cancel()
@@ -69,10 +102,8 @@ final class ListeningActivity {
     /// The latest conversation's topics.
     func show(_ threads: [TopicThread]) {
         guard AppModel.shared.recording else { return }
-        // iOS ends a Live Activity after some hours; start another if so (before the topics go
-        // in: starting one starts it empty).
-        if let a = activity, a.activityState == .ended || a.activityState == .dismissed { activity = nil }
-        if activity == nil { start() }
+        // iOS ends a Live Activity after some hours; start another if so.
+        restoreIfNeeded(often: true)
         state.trail = threads.suffix(4).map {
             ListeningAttributes.Step(title: $0.title, hanging: $0.status == .hanging, current: $0.status == .current)
         }
@@ -99,7 +130,7 @@ final class ListeningActivity {
     /// a half: iOS gives those buttons nowhere else to show it. The pill opens out to show it,
     /// and the Lock Screen lights up.
     func showAnswer(_ text: String) {
-        guard let current = activity else { return }
+        guard showing, let current = activity else { return }
         answers += 1
         let mine = answers
         state.answer = String(text.prefix(280))

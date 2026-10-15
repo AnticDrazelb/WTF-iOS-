@@ -29,7 +29,14 @@ final class Recorder: @unchecked Sendable {
     private let queue = DispatchQueue(label: "wtf.recorder")
     private let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
     private var converter: AVAudioConverter?
-    private(set) var running = false
+    /// Listening's on. Set only with [sessionLock] held, and under [infoLock] too, so it can be
+    /// read from any thread (the audio notifications, the app, the intents).
+    var running: Bool {
+        infoLock.lock(); defer { infoLock.unlock() }
+        return _running
+    }
+    private var _running = false
+    private func setRunning(_ on: Bool) { infoLock.lock(); _running = on; infoLock.unlock() }
     /// WTF is reading an answer aloud: what the microphone hears meanwhile is dropped, so WTF
     /// doesn't transcribe (and act on) its own voice.
     var speaking = false {
@@ -110,7 +117,7 @@ final class Recorder: @unchecked Sendable {
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             throw error
         }
-        running = true
+        setRunning(true)
     }
 
     /// A new engine, made once iOS has given WTF the microphone. One made while it couldn't have
@@ -204,7 +211,7 @@ final class Recorder: @unchecked Sendable {
     func stop() {
         sessionLock.lock(); defer { sessionLock.unlock() }
         guard running else { return }
-        running = false
+        setRunning(false)
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         queue.sync { closeChunk(cut: false) }
@@ -214,7 +221,7 @@ final class Recorder: @unchecked Sendable {
     /// Listening is on, but the mic isn't actually running (iOS didn't say the interruption ended).
     var stalled: Bool {
         infoLock.lock(); defer { infoLock.unlock() }
-        return running && !engine.isRunning
+        return _running && !engine.isRunning
     }
 
     /// Starts the mic again after something took it. Safe to call any time listening is on.
@@ -254,7 +261,7 @@ final class Recorder: @unchecked Sendable {
                 Log.info("The microphone's busy (a call or Siri); listening carries on when it's free")
                 throw error
             }
-            running = false
+            setRunning(false)
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             onStopped?()
             throw error
