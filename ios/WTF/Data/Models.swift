@@ -159,4 +159,6 @@ struct ChatMessage: Identifiable, Equatable, Codable {
     var date = Date()
     /// The conversations it's about (or drew on): deleting one deletes this too.
     var about: [UUID]? = nil
+    /// A question's conversation, if it was asked about one: Ask Again asks about it again.
+    var focus: UUID? = nil
 }

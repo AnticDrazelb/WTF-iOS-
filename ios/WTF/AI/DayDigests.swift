@@ -52,16 +52,13 @@ final class DayDigests {
         busy = true
         defer { busy = false }
         let started = generation
-        do {
-            let text = try await Brain.day(Prompts.day(notes, today: Calendar.current.isDateInToday(day)))
-            guard !text.isEmpty, generation == started else { return nil }
-            kept[key] = Kept(from: from, text: text)
-            save()
-            return text
-        } catch {
-            Log.error("Couldn't write the day's recap", error)
-            return nil
-        }
+        let prompt = Prompts.day(notes, today: Calendar.current.isDateInToday(day))
+        // With a deadline: a stalled model would otherwise hold busy, and every later recap, for ever.
+        guard let text = await withDeadline(40, { await Log.attempt("Couldn't write the day's recap", { try await Brain.day(prompt) }) }),
+              !text.isEmpty, generation == started else { return nil }
+        kept[key] = Kept(from: from, text: text)
+        save()
+        return text
     }
 
     /// A conversation deleted: its day's recap goes until it's written again without it.

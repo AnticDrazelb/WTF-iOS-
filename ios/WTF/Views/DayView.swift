@@ -87,6 +87,7 @@ struct YourDayRow: View {
 /// "Your Day" in full: the recap, what got settled, what's still to do, what was left hanging,
 /// and every conversation; each a tap from where it was said.
 struct DayView: View {
+    @Environment(AppModel.self) private var model
     let day: Date
     @Query private var conversations: [Conversation]
     @State private var recap: String?
@@ -134,6 +135,9 @@ struct DayView: View {
         }
         .navigationTitle("Your Day")
         .animation(.default, value: recap)
+        // So a conversation going past keeping closes this page only if it's from this day.
+        .onAppear { model.daysOnScreen.insert(Calendar.current.startOfDay(for: day)) }
+        .onDisappear { model.daysOnScreen.remove(Calendar.current.startOfDay(for: day)) }
         .task(id: DayDigests.fingerprint(toWrite)) {
             recap = DayDigests.shared.last(for: day)
             writing = DayDigests.shared.needsWriting(day, notes: toWrite)

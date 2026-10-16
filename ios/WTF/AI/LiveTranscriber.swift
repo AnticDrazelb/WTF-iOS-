@@ -131,8 +131,10 @@ final class LiveTranscriber: @unchecked Sendable {
 
     func stop() async {
         let (analyzer, input, results) = locked { () -> (SpeechAnalyzer?, AsyncStream<AnalyzerInput>.Continuation?, Task<Void, Never>?) in
+            // The words it held go too: nothing heard before a stop is answered from after it.
             defer {
                 self.analyzer = nil; self.input = nil; self.results = nil; since = nil
+                words = []; provisional = []
             }
             return (self.analyzer, self.input, self.results)
         }

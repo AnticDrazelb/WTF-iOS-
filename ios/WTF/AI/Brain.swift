@@ -201,6 +201,20 @@ enum Brain {
         return false
     }
 
+    /// Why Apple Intelligence couldn't answer, in words that say what to do: most of its failures
+    /// have nothing to do with how the question was put.
+    static func why(_ error: Error?) -> String {
+        if let failure = error as? LanguageModelSession.GenerationError {
+            switch failure {
+            case .assetsUnavailable: return "Apple Intelligence is updating. Try again in a few minutes."
+            case .unsupportedLanguageOrLocale: return "Apple Intelligence doesn\u{2019}t support this language yet."
+            case .rateLimited, .concurrentRequests: return "Apple Intelligence is busy. Try again in a moment."
+            default: break
+            }
+        }
+        return "Apple Intelligence couldn\u{2019}t answer that one. Try asking another way."
+    }
+
     /// The answer as it's written, each element the whole answer so far.
     static func ask(_ prompt: String) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in

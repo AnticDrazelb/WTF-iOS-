@@ -67,15 +67,21 @@ final class ReadAloud: NSObject {
     /// For the Action button: starts reading [text] into the headphones and returns as soon as
     /// it's playing (false if there are no headphones, so nothing is played). The sound itself
     /// keeps the app awake until it's finished.
+    @discardableResult
     func startIntoHeadphones(_ text: String) async -> Bool {
+        await readIntoHeadphones(text) != nil
+    }
+
+    /// As startIntoHeadphones, but with how long the reading lasts, in seconds (nil if it isn't
+    /// played): a press's "before that?" window runs from when you've heard it, not from the press.
+    func readIntoHeadphones(_ text: String) async -> TimeInterval? {
         let ownSession = prepareSession()
         guard Self.headphonesOn else {
             Log.info("Not read aloud: sound is going to \(Self.route), not headphones")
             if ownSession { releaseSession() }
-            return false
+            return nil
         }
-        await start(text, voice: Self.voice, speed: Self.speed, ownSession: ownSession)
-        return true
+        return await start(text, voice: Self.voice, speed: Self.speed, ownSession: ownSession)
     }
 
     /// The answer kept ready for the Action button: its sound made now, so a press just plays it.
@@ -131,9 +137,11 @@ final class ReadAloud: NSObject {
         return u
     }
 
-    /// Starts saying [text]; returns once it's playing. When it's finished (unless a newer
-    /// reading has taken over) the session's let go, if it was set up for this.
-    private func start(_ text: String, voice: AVSpeechSynthesisVoice?, speed: Double, ownSession: Bool) async {
+    /// Starts saying [text]; returns once it's playing, with roughly how long it'll take (nil if
+    /// a newer reading took over first). When it's finished (unless a newer reading has taken
+    /// over) the session's let go, if it was set up for this.
+    @discardableResult
+    private func start(_ text: String, voice: AVSpeechSynthesisVoice?, speed: Double, ownSession: Bool) async -> TimeInterval? {
         reading += 1
         let mine = reading
         // An older reading's session may still be held, and this one may yet be overtaken itself:
@@ -156,17 +164,17 @@ final class ReadAloud: NSObject {
             synthesizer = AVSpeechSynthesizer()
             sound = await render(utterance(text, voice: voice, speed: speed))
         }
-        guard mine == reading else { return }
-        if !sound.isEmpty, let heard = startPlaying(sound) {
+        guard mine == reading else { return nil }
+        if !sound.isEmpty, let playing = startPlaying(sound) {
             Log.info("Reading an answer aloud into \(Self.route)")
             Task {
-                await heard()
+                await playing.heard()
                 guard mine == self.reading else { return }
                 self.player.stop()
                 self.engine.stop()
                 self.finished()
             }
-            return
+            return playing.seconds
         }
         // Last resort: let iOS's speech service say it (not recorded either, until it's done).
         Log.error("Couldn't play the speech; handing it to iOS to say into \(Self.route)")
@@ -174,6 +182,8 @@ final class ReadAloud: NSObject {
         handedOver = ObjectIdentifier(spoken)
         Recorder.shared.speaking = true
         synthesizer.speak(spoken)
+        // Its length isn't known: about three words a second at normal speed.
+        return Double(text.split(separator: " ").count) / (3 * max(speed, 0.1))
     }
 
     /// The speech as sound, or nothing if the synthesiser didn't produce any within 6 s.
@@ -196,9 +206,9 @@ final class ReadAloud: NSObject {
         return collected.buffers
     }
 
-    /// Starts playing [sound]; the returned wait ends once it's been heard (or should have been).
-    /// Nil if it couldn't be played.
-    private func startPlaying(_ sound: [AVAudioPCMBuffer]) -> (() async -> Void)? {
+    /// Starts playing [sound]: how long it lasts, and a wait that ends once it's been heard (or
+    /// should have been). Nil if it couldn't be played.
+    private func startPlaying(_ sound: [AVAudioPCMBuffer]) -> (seconds: TimeInterval, heard: () async -> Void)? {
         guard let format = sound.first?.format else { return nil }
         if connected != format {
             engine.stop()
@@ -222,7 +232,7 @@ final class ReadAloud: NSObject {
         }
         Recorder.shared.speaking = true // what WTF says isn't recorded
         player.play()
-        return {
+        return (seconds, {
             await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
                 heard.wait(done)
                 Task {
@@ -230,7 +240,7 @@ final class ReadAloud: NSObject {
                     heard.finish()
                 }
             }
-        }
+        })
     }
 
     /// The synthesiser hands over its own buffers (sometimes 16-bit); a float copy the player can take.

@@ -62,6 +62,9 @@ enum Log {
         return f.string(from: Date())
     }
 
+    /// Delete All Data: the log notes when you talked, so it goes too.
+    static func clear() { queue.sync { try? FileManager.default.removeItem(at: file) } }
+
     /// The last [lines] lines.
     static func tail(_ lines: Int = 400) -> String {
         queue.sync {

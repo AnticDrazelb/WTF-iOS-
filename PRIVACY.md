@@ -8,7 +8,7 @@ WTF is an app that listens while you've turned it on, so it can tell you what yo
 While listening is on, WTF records speech it hears through your iPhone's microphone (or your AirPods, if you choose), including other people's voices. Silence and music aren't kept.
 
 ## Where it goes
-Nowhere. Speech is transcribed, summarised and searched on your iPhone, using Apple's on-device speech recognition and Apple Intelligence. WTF has no servers, no accounts, no analytics and no advertising, and it collects no data. WTF's data is excluded from iCloud and computer backups.
+Nowhere. Speech is transcribed, summarised and searched on your iPhone, using Apple's on-device speech recognition and Apple Intelligence. WTF has no servers, no accounts, no analytics and no advertising, and it collects no data. WTF's data is excluded from iCloud and computer backups; only its settings are backed up.
 
 WTF downloads models it needs (speech recognition, a speech detector and voice models) once. If you turn on Settings › Better Accuracy, it also downloads NVIDIA's Parakeet speech model (about 440 MB) from Hugging Face, once. These downloads don't include anything about you.
 
@@ -27,4 +27,4 @@ Delete any conversation, list item, person or fact in the app, or everything in 
 Let people know when WTF is listening, and follow the law where you are on recording conversations.
 
 ## Contact
-Questions: open an issue at https://github.com/justmeclaude-ops/WTF-iphone/issues
+Questions: open an issue at https://github.com/AnticDrazelb/WTF-iOS-/issues

@@ -2,8 +2,10 @@ import SwiftUI
 import WTFCore
 
 /// The thread map: the topics a conversation wandered through, left to right. Ones dropped
-/// part-way glow orange; tap any to get back to where you were with it.
+/// part-way have a dashed outline; tap any to get back to where you were with it (not while
+/// another answer's being written, as that tap would be lost).
 struct ThreadTrail: View {
+    @Environment(AppModel.self) private var model
     let threads: [TopicThread]
     let onTap: (TopicThread) -> Void
 
@@ -15,6 +17,7 @@ struct ThreadTrail: View {
                         if i > 0 { Image(systemName: "chevron.compact.right").foregroundStyle(.tertiary) }
                         Button { onTap(t) } label: { ThreadChip(thread: t) }
                             .buttonStyle(.plain)
+                            .disabled(model.status != nil)
                             .id(t.id)
                     }
                 }
@@ -43,7 +46,8 @@ struct ThreadChip: View {
             if hanging {
                 Image(systemName: "ellipsis.bubble.fill")
             } else if current {
-                Image(systemName: "waveform").symbolEffect(.variableColor.iterative, options: .repeating)
+                // Not the waveform: that's kept for listening.
+                Image(systemName: "smallcircle.filled.circle")
             }
             Text(thread.title).lineLimit(1)
         }
@@ -90,7 +94,7 @@ struct ThreadList: View {
     private func icon(_ t: TopicThread) -> String {
         switch t.status {
         case .hanging: return "ellipsis.bubble.fill"
-        case .current: return "waveform"
+        case .current: return "smallcircle.filled.circle"
         case .resumed: return "arrow.uturn.backward.circle"
         case .finished: return "checkmark.circle"
         }

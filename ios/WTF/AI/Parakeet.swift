@@ -51,13 +51,21 @@ actor Parakeet {
             return m
         }
         loading = job
-        defer { loading = nil }
+        // Only its own: a download stopped (remove) and started again has a newer one.
+        defer { if loading == job { loading = nil } }
+        let loaded: AsrManager
         do {
-            manager = try await job.value
+            loaded = try await job.value
         } catch {
             Log.error("Better Accuracy model didn't load", error)
             throw error
         }
+        // Stopped (switched off) while it loaded, but it finished anyway: not kept.
+        guard !job.isCancelled else {
+            Task { await loaded.cleanup() }
+            throw CancellationError()
+        }
+        manager = loaded
         Self.excludeFromBackup()
         UserDefaults.standard.set(true, forKey: "parakeetDownloaded")
         Log.info("Better Accuracy model ready")
@@ -95,6 +103,7 @@ actor Parakeet {
 
     /// Switched off in Settings: the download goes, to give the space back.
     func remove() async {
+        cancelLoading()
         await queue?.value
         release()
         try? FileManager.default.removeItem(at: AsrModels.defaultCacheDirectory(for: .v2))
@@ -107,6 +116,12 @@ actor Parakeet {
     func unload() {
         guard !transcribing else { return }
         release()
+    }
+
+    /// A download going on is stopped (FluidAudio has to notice the cancel for the transfer to stop).
+    private func cancelLoading() {
+        loading?.cancel()
+        loading = nil
     }
 
     private func release() {

@@ -201,18 +201,22 @@ struct AskView: View {
                 .padding(.leading, 16).padding(.vertical, 12)
                 .onChange(of: typing) { if typing { Brain.prewarm() } }
                 .onSubmit(send)
-            Button(action: send) {
-                Image(systemName: "arrow.up")
+            // While an answer's being worked out it's Stop, so a long one needn't be waited out.
+            let asking = model.status != nil
+            Button {
+                if asking { model.stopAsking() } else { send() }
+            } label: {
+                Image(systemName: asking ? "stop.fill" : "arrow.up")
                     .font(.subheadline.weight(.bold))
                     .foregroundStyle(Color(.systemBackground))
                     .frame(width: 32, height: 32)
-                    .background(Circle().fill(canSend ? Color.primary : Color.secondary.opacity(0.35)))
+                    .background(Circle().fill(canSend || asking ? Color.primary : Color.secondary.opacity(0.35)))
                     // The full 44 pt to tap, the circle drawn as before.
                     .frame(width: 44, height: 44)
                     .contentShape(Rectangle())
             }
-            .disabled(!canSend)
-            .accessibilityLabel("Ask")
+            .disabled(!canSend && !asking)
+            .accessibilityLabel(asking ? "Stop" : "Ask")
             .sensoryFeedback(.impact(weight: .light), trigger: model.messages.count)
         }
         .glassEffect(in: .rect(cornerRadius: 22))
@@ -256,7 +260,7 @@ struct Bubble: View {
                     if message.fromUser {
                         if !FollowUps.oneOff(message.text) {
                             Button("Ask Again", systemImage: "arrow.clockwise") {
-                                model.ask(message.text, focus: FollowUps.focus(of: message))
+                                model.ask(message.text, focus: message.focus ?? FollowUps.focus(of: message))
                             }
                             .disabled(model.status != nil)
                         }

@@ -357,6 +357,19 @@ actor Pipeline {
         }
     }
 
+    /// Conversations deleted (by the app): recordings from their time still waiting to be
+    /// transcribed (a retry) go too, rather than coming back later as a new conversation.
+    func drop(spans: [(start: Date, end: Date)]) {
+        guard !spans.isEmpty else { return }
+        let gap = Double(gapMinutes * 60)
+        let waiting = (try? modelContext.fetch(FetchDescriptor<Chunk>(predicate: #Predicate { $0.status == "pending" && $0.conversationID == nil }))) ?? []
+        for chunk in waiting where spans.contains(where: { chunk.start >= $0.start.addingTimeInterval(-gap) && chunk.start <= $0.end.addingTimeInterval(gap) }) {
+            if let path = chunk.path { try? FileManager.default.removeItem(atPath: path) }
+            modelContext.delete(chunk)
+        }
+        try? modelContext.save()
+    }
+
     /// Once: what earlier versions got wrong, put right. The "[1]" a correction left at the start
     /// of some lines, and list suggestions that weren't: someone being picked up filed as
     /// shopping, today's plans with no time as calendar items, "not booked yet" on things nobody
@@ -406,7 +419,7 @@ actor Pipeline {
         unremembered = [:]
         try? modelContext.delete(model: Fact.self)
         Learned.forget()
-        UserDefaults.standard.removeObject(forKey: "declinedNames")
+        DeclinedNames.forget()
         try? modelContext.delete(model: Conversation.self)
         try? modelContext.delete(model: Chunk.self)
         try? modelContext.delete(model: ActionItem.self)
@@ -910,7 +923,7 @@ actor Pipeline {
             summaryFailures[id, default: 0] += 1
             Log.error("Couldn't summarise a \(transcript.count)-character conversation (try \(summaryFailures[id]!))")
             if summaryFailures[id]! >= 3, let c = conversation(id) {
-                c.title = "Conversation"
+                if c.title == nil { c.title = "Conversation" }
                 c.summary = ""
                 // Its facts and list items are still looked for: they're asked for separately.
                 c.extracted = false
@@ -920,7 +933,8 @@ actor Pipeline {
             return
         }
         guard let c = conversation(id) else { return }
-        c.title = written.title
+        // Only the user names a conversation before it's summarised: their name stays.
+        if c.title == nil { c.title = written.title }
         c.summary = written.points.map { "\u{2022} " + $0 }.joined(separator: "\n")
         c.extracted = false
         try? modelContext.save()
@@ -993,11 +1007,16 @@ actor Pipeline {
             }
         }
         guard !fresh.isEmpty else { return }
+        // When each line was said, worked out over the whole transcript, so a line said after
+        // midnight isn't dated a day early.
+        let lines = c.transcript.split(separator: "\n")
+        let times = TranscriptFormat.times(of: lines, from: c.start)
         for a in fresh {
             let heard = a.source.map { Self.heard($0, about: a, on: c.start) }
+            let said = a.source.flatMap { source in lines.lastIndex(where: { $0 == source }).flatMap { times[$0] } }
             let item = ActionItem(type: a.type.rawValue, title: a.title, start: a.resolved?.start(),
                                   allDay: a.resolved?.allDay ?? false, place: a.place, quote: heard?.quote ?? a.whenText, conversationID: cid)
-            item.heardAt = heard?.at
+            item.heardAt = said ?? heard?.at
             item.note = a.note
             modelContext.insert(item)
         }

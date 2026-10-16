@@ -70,7 +70,7 @@ struct RootView: View {
             Tab("Lists", systemImage: "checklist", value: 2) { ListsView() } // no tab swipe: rows swipe to delete
             Tab("Settings", systemImage: "gear", value: 3) { SettingsView().modifier(TabSwipe()) }
         }
-        // Black and white throughout; colour only where it means something (Settings, deleting).
+        // Black and white throughout; colour only where it means something (switches, deleting).
         .tint(.primary)
         .sensoryFeedback(.selection, trigger: model.tab)
         .sheet(isPresented: Binding(get: { !welcomed }, set: { if !$0 { welcomed = true } })) {
@@ -177,28 +177,35 @@ struct TabSwipe: ViewModifier {
     }
 }
 
-/// Listening on or off, in words, in the app's quiet black and white: "Listen" with a mic when
-/// it's off, a moving waveform and "Listening" when it's on (tap to pause).
+/// Listening on or off, in words, in the app's quiet black and white: "Listen" with a still
+/// waveform when it's off, a moving one and "Listening" when it's on (tap to pause), and "Paused"
+/// while something else (a call, Siri) has the microphone.
 struct ListeningButton: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
         // While a start's under way (the first can be a long download), a tap gives up on it.
-        Button { model.setListening(model.isStarting ? false : !model.recording) } label: {
+        // Paused (a call or Siri took the microphone): a tap tries to carry on.
+        Button {
+            if model.recording && model.paused { model.resumeIfNeeded() }
+            else { model.setListening(model.isStarting ? false : !model.recording) }
+        } label: {
             HStack(spacing: 6) {
-                if model.recording {
+                if model.recording && model.paused {
+                    Image(systemName: "waveform.slash")
+                } else if model.recording {
                     Image(systemName: "waveform").symbolEffect(.variableColor.iterative, options: .repeating)
                 } else if model.isStarting {
                     ProgressView().controlSize(.small)
                 } else {
-                    Image(systemName: "mic")
+                    Image(systemName: "waveform")
                 }
-                Text(model.recording ? "Listening" : model.isStarting ? "Starting\u{2026}" : "Listen").font(.subheadline.weight(.medium))
+                Text(model.recording ? (model.paused ? "Paused" : "Listening") : model.isStarting ? "Starting\u{2026}" : "Listen").font(.subheadline.weight(.medium))
             }
             .foregroundStyle(.primary)
             .padding(.horizontal, 4)
         }
-        .accessibilityHint(model.recording ? "Pauses listening" : model.isStarting ? "Cancels starting" : "Starts listening")
+        .accessibilityHint(model.recording ? (model.paused ? "Tries to carry on listening" : "Pauses listening") : model.isStarting ? "Cancels starting" : "Starts listening")
         .sensoryFeedback(.impact(weight: .medium), trigger: model.recording)
     }
 }
@@ -229,7 +236,7 @@ struct WelcomeSheet: View {
                         .background(Capsule().fill(Color.primary))
                 }
                 .buttonStyle(.plain)
-                Link("Privacy Policy", destination: URL(string: "https://github.com/justmeclaude-ops/WTF-iphone/blob/main/PRIVACY.md")!)
+                Link("Privacy Policy", destination: SettingsView.privacyPolicy)
                     .font(.footnote).foregroundStyle(.secondary).frame(maxWidth: .infinity)
             }
             .padding(.horizontal, 28).padding(.top, 12).padding(.bottom, 20)

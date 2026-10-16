@@ -126,6 +126,17 @@ final class ListeningActivity {
         Task { await current?.update(content) }
     }
 
+    /// Short enough for the card's three lines, cut at a word with an ellipsis. The whole answer
+    /// is still in Ask and in the notification.
+    private static func clipped(_ text: String, to limit: Int) -> String {
+        guard text.count > limit else { return text }
+        let cut = text.prefix(limit - 1)
+        var words = cut.lastIndex(where: { $0.isWhitespace }).map { cut[..<$0] } ?? cut
+        // Only the end is tidied: an opening quote or bracket stays.
+        while let last = words.last, last.isWhitespace || last.isPunctuation { words = words.dropLast() }
+        return (words.isEmpty ? String(cut) : String(words)) + "…"
+    }
+
     /// The answer to a press of the card's or the pill's buttons, shown on them for a minute and
     /// a half: iOS gives those buttons nowhere else to show it. The pill opens out to show it,
     /// and the Lock Screen lights up.
@@ -133,7 +144,7 @@ final class ListeningActivity {
         guard showing, let current = activity else { return }
         answers += 1
         let mine = answers
-        state.answer = String(text.prefix(280))
+        state.answer = Self.clipped(text, to: 180)
         let content = ActivityContent(state: state, staleDate: Self.fresh)
         // With headphones in it's being read aloud already: no alert sound over the voice.
         let alert = ReadAloud.headphonesOn ? nil : AlertConfiguration(title: "WTF", body: "\(text)", sound: .default)

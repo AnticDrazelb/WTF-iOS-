@@ -24,8 +24,6 @@ struct SettingsView: View {
     @State private var accessProblem: String?
     @AppStorage("parakeet") private var betterOn = false
     @AppStorage("parakeetDownloaded") private var betterDownloaded = false
-    /// How far the Better Accuracy download has got (0–1), while it's going.
-    @State private var betterProgress: Double?
     /// Why the Better Accuracy download didn't finish, so the row says more than "Try Again".
     @State private var betterProblem: String?
     /// A shorter Keep Transcripts, waiting to be confirmed: it deletes conversations for good.
@@ -59,7 +57,7 @@ struct SettingsView: View {
                 if activitiesOff || notificationsOff {
                     Section {
                         if activitiesOff {
-                            warning("Live Activities are off for WTF, so there\u{2019}s no listening pill or Lock Screen card, and the Action button and Control Center can\u{2019}t start listening.")
+                            warning("Live Activities are off for WTF, so there\u{2019}s no listening pill or Lock Screen card, and \(ActionButtonSetupView.hasActionButton ? "the Action button and " : "")Control Center can\u{2019}t start listening.")
                         }
                         if notificationsOff {
                             warning("Notifications are off for WTF, so you\u{2019}re not told when it stops listening, and answers from Control Center or the Lock Screen don\u{2019}t show while WTF is closed.")
@@ -100,7 +98,7 @@ struct SettingsView: View {
                         })).tint(.green)
                         if betterOn && Parakeet.suitable {
                             LabeledContent("Parakeet Model") {
-                                if let betterProgress { betterDownloading(betterProgress) }
+                                if let progress = model.betterProgress { betterDownloading(progress) }
                                 else if betterDownloaded { Text("Ready").foregroundStyle(.green) }
                                 else { Button(betterProblem == nil ? "Download (440 MB)" : "Try Again") { downloadBetter() } }
                             }
@@ -234,6 +232,11 @@ struct SettingsView: View {
                 if useContacts && !PersonalWords.contactsAllowed { useContacts = false }
                 if useCalendar && !PersonalWords.calendarAllowed { useCalendar = false }
                 fixesCount = Learned.fixes.count
+                // Left behind (switched off as the app was stopped): there's no switch to delete it with.
+                if !betterOn && betterDownloaded && model.betterProgress == nil {
+                    await Parakeet.shared.remove()
+                    betterDownloaded = Parakeet.downloaded
+                }
                 await checkPermissions()
             }
             // A start downloads the speech model too: the row catches up when it's done.
@@ -317,7 +320,7 @@ struct SettingsView: View {
         if on {
             if !betterDownloaded { downloadBetter() }
         } else {
-            betterProgress = nil
+            model.betterProgress = nil
             Task {
                 await Parakeet.shared.remove()
                 betterDownloaded = Parakeet.downloaded
@@ -334,11 +337,13 @@ struct SettingsView: View {
             betterProblem = Self.noSpace
             return
         }
-        betterProgress = 0
+        // Kept on the model, so the bar survives the page being rebuilt.
+        let model = self.model
+        model.betterProgress = 0
         Task {
             do {
                 try await Parakeet.shared.prepare { fraction in
-                    Task { @MainActor in if betterProgress != nil { betterProgress = fraction } }
+                    Task { @MainActor in if model.betterProgress != nil { model.betterProgress = fraction } }
                 }
                 // Only needed when a conversation ends: not held in memory meanwhile.
                 await Parakeet.shared.unload()
@@ -347,7 +352,7 @@ struct SettingsView: View {
                 if betterOn { betterProblem = Self.why(error) }
             }
             betterDownloaded = Parakeet.downloaded
-            betterProgress = nil
+            model.betterProgress = nil
             // Switched off while it was downloading: it doesn't stay.
             if !betterOn, betterDownloaded {
                 await Parakeet.shared.remove()

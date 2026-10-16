@@ -116,14 +116,27 @@ public enum Prompts {
         }.prefix(limit).map { $0.trimmingCharacters(in: .whitespaces) }
     }
 
+    /// "Summarise my day so far", "what did I do today?": today's recap. Not another day's
+    /// ("yesterday", "Friday's meeting", a birthday), which is looked for like any other question.
+    public static func isAboutToday(_ question: String) -> Bool {
+        todayWords.test(question) && !otherDay.test(question)
+    }
+    static let todayWords = Rx(#"\b(my day|today|the day so far)\b"#)
+    static let otherDay = Rx(#"\b(yesterday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|birthday|last (night|week))\b"#)
+
     /// Any other question: titles and summaries of the day, plus the best-matching transcript.
     /// Held to [budget] tokens in all (the model's 4,096 also hold its instructions and the
     /// answer): the transcript first, then as many conversations' notes as fit, newest first,
-    /// with just the title once the summaries no longer fit.
+    /// with just the title once the summaries no longer fit. [earlier] is the last question and
+    /// answer, so a follow-up ("and what did she say?") has something to follow on from.
     public static func focused(question: String, notes: [(label: String, title: String?, summary: String?)], best: (label: String, transcript: String)?,
-                               now: Date, background: String = "", budget: Int = 2_800) -> String {
+                               now: Date, background: String = "", earlier: String = "", budget: Int = 2_800) -> String {
         let which = notes.count > 1 ? ", saying which conversation (its time) you mean" : ""
-        let ending = "\n(It's \(clock(now)) now.) Answer my question in 2 to 4 short sentences\(which).\nMy question: \(question)"
+        // Short, and never more than a sixth of the budget.
+        var before = earlier.trimmingCharacters(in: .whitespacesAndNewlines)
+        if tokens(before) > budget / 6 { before = String(before.prefix(budget / 6 * 4)) + "\u{2026}" }
+        if !before.isEmpty { before = "\n" + before + "\n" }
+        let ending = "\(before)\n(It's \(clock(now)) now.) Answer my question in 2 to 4 short sentences\(which).\nMy question: \(question)"
         // The background's already short (see Understanding.background), but it counts.
         var context = background
         if tokens(context) > budget / 3 { context = String(context.prefix(budget / 3 * 4)) + "\n\n" }
@@ -164,10 +177,18 @@ public enum Prompts {
             t = leadIn.replace(t, with: "").trimmingCharacters(in: .whitespacesAndNewlines)
         }
         t = tellingTheTime.replace(t, with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+        // The answer's shown as plain text, so no Markdown bold, headings or "*" bullets.
+        t = bold.replace(t, with: "")
+        t = heading.replace(t, with: "")
+        t = bullet.replace(t, with: "\u{2022} ")
         t = Rx(#"\n{3,}"#).replace(t, with: "\n\n")
         guard let first = t.first, first.isLowercase else { return t }
         return first.uppercased() + t.dropFirst()
     }
+    // Compiled once: tidy runs on every streamed chunk.
+    static let bold = Rx(#"\*\*|__"#)
+    static let heading = Rx(#"(?m)^[ \t]*#{1,6}[ \t]+"#)
+    static let bullet = Rx(#"(?m)^[ \t]*[*-][ \t]+"#)
     static let leadIn = Rx(
         #"^(?:(?:sure|okay|ok|alright|all right|certainly|of course|absolutely|got it)\b[,!.]?\s*(?:so\b,?\s*)?|"# +
         #"(?:here'?s|here is|this is)\s+(?:a|an|the|your|my)?\s*(?:quick|short|brief)?\s*(?:summary|recap|rundown|overview|answer)\b[^:\n]*?(?::|\.(?=\s|$))\s*|"# +

@@ -68,6 +68,8 @@ struct TimelineView: View {
                                         model.tab = 0
                                         model.ask(c.title.map { "What happened in \u{201C}\($0)\u{201D}?" } ?? "What was said then?", focus: c.id)
                                     }
+                                    // Not while another answer's being written: the question would be lost.
+                                    .disabled(model.status != nil)
                                     if let summary = c.summary {
                                         Button("Copy Summary", systemImage: "doc.on.doc") {
                                             UIPasteboard.general.string = [c.title, summary].compactMap { $0 }.joined(separator: "\n")
@@ -298,7 +300,7 @@ struct ConversationView: View {
     @State private var fixing: String?
     @State private var fixedText = ""
     /// "Is Speaker 2 Sarah?" suggestions turned down, and the ones worked out (off the main path).
-    @AppStorage("declinedNames") private var declined = ""
+    @State private var declined = DeclinedNames.all
     @State private var hints: [NameHints.Hint] = []
 
     var body: some View {
@@ -328,7 +330,7 @@ struct ConversationView: View {
                             .font(.subheadline).foregroundStyle(.secondary)
                         HStack {
                             Button("Yes") { name(hint.label, as: hint.name) }.buttonStyle(.bordered)
-                            Button("No") { declined += "\n" + key(hint) }.buttonStyle(.borderless).foregroundStyle(.secondary)
+                            Button("No") { declined.insert(key(hint)); DeclinedNames.all = declined }.buttonStyle(.borderless).foregroundStyle(.secondary)
                         }
                         .buttonBorderShape(.capsule)
                     }
@@ -375,6 +377,9 @@ struct ConversationView: View {
         }
         .navigationTitle(displayTitle(conversation))
         .navigationBarTitleDisplayMode(.inline)
+        // So a conversation going past keeping closes this page only if it's this one.
+        .onAppear { model.onScreen.insert(conversation.id) }
+        .onDisappear { model.onScreen.remove(conversation.id) }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 ShareLink(item: shareText(conversation))
@@ -383,6 +388,7 @@ struct ConversationView: View {
                         model.tab = 0
                         model.ask(conversation.title.map { "What happened in \u{201C}\($0)\u{201D}?" } ?? "What was said then?", focus: conversation.id)
                     }
+                    .disabled(model.status != nil)
                     Button("Rename\u{2026}", systemImage: "pencil") { newTitle = conversation.title ?? ""; renaming = true }
                 } label: {
                     Label("More", systemImage: "ellipsis")
@@ -452,8 +458,7 @@ struct ConversationView: View {
 
     /// Names for unnamed voices from how people were addressed, minus any turned down.
     private var nameHints: [NameHints.Hint] {
-        let no = Set(declined.split(separator: "\n").map(String.init))
-        return hints.filter { !no.contains(key($0)) && Labels.speakers(in: conversation.transcript).contains($0.label) }
+        return hints.filter { !declined.contains(key($0)) && Labels.speakers(in: conversation.transcript).contains($0.label) }
     }
 
     private func key(_ hint: NameHints.Hint) -> String { "\(conversation.id.uuidString)|\(hint.label)|\(hint.name)" }
@@ -521,6 +526,41 @@ struct FixWordsSheet: View {
 /// Speakers in quiet type: you in full black (or white), everyone else in grey.
 enum VoiceColor {
     static func of(_ label: String) -> Color { label == Labels.me ? .primary : .secondary }
+}
+
+/// "Is Speaker 2 Sarah?" suggestions turned down. Kept with WTF's other data (not in the
+/// settings, which go in backups).
+enum DeclinedNames {
+    /// Where earlier versions kept them, one to a line.
+    private static let key = "declinedNames"
+
+    private static var file: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("declined.json")
+    }
+
+    static var all: Set<String> {
+        get {
+            if let data = try? Data(contentsOf: file) { return Set((try? JSONDecoder().decode([String].self, from: data)) ?? []) }
+            // Moved out of the settings once.
+            guard let old = UserDefaults.standard.string(forKey: key) else { return [] }
+            let names = Set(old.split(separator: "\n").map(String.init))
+            save(names)
+            UserDefaults.standard.removeObject(forKey: key)
+            return names
+        }
+        set { save(newValue) }
+    }
+
+    static func forget() {
+        try? FileManager.default.removeItem(at: file)
+        UserDefaults.standard.removeObject(forKey: key)
+    }
+
+    private static func save(_ names: Set<String>) {
+        guard let data = try? JSONEncoder().encode(names.sorted()) else { return }
+        try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? data.write(to: file, options: .atomic)
+    }
 }
 
 /// Its title, or what's happening until it has one.

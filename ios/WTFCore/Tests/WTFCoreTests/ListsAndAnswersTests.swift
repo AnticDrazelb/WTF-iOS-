@@ -79,6 +79,8 @@ final class ListsAndAnswersTests: XCTestCase {
         XCTAssertEqual(Prompts.tidy("Based on the notes, you were talking about the MOT."), "You were talking about the MOT.")
         XCTAssertEqual(Prompts.tidy("You said it's now booked for Thursday."), "You said it's now booked for Thursday.")
         XCTAssertEqual(Prompts.tidy("Right after lunch you rang the garage."), "Right after lunch you rang the garage.")
+        XCTAssertEqual(Prompts.tidy("**Ezra's party**\n- Cake from Tesco\n* Balloons"), "Ezra's party\n\u{2022} Cake from Tesco\n\u{2022} Balloons")
+        XCTAssertEqual(Prompts.tidy("## Garage\nIt's booked for 2-3pm."), "Garage\nIt's booked for 2-3pm.")
         XCTAssertFalse(Prompts.instructions.isEmpty)
         let one = Prompts.focused(question: "Summarise this conversation", notes: [("Today 14:04", "Ezra's birthday", nil)], best: nil, now: start)
         XCTAssertFalse(one.contains("which conversation"))
@@ -133,5 +135,32 @@ final class FocusedBudgetTests: XCTestCase {
             XCTAssertTrue(prompt.contains("- Today 10:00: Conversation 0"))
             XCTAssertTrue(prompt.hasSuffix("My question: What did we decide about the garage?"))
         }
+    }
+
+    func testAFollowUpCarriesTheLastAnswerWithinTheBudget() {
+        let summary = Array(repeating: "\u{2022} A long point about what was said, who said it and what was decided about it.", count: 8).joined(separator: "\n")
+        let notes = (0..<12).map { (label: "Today \(10 + $0):00", title: Optional("Conversation \($0)"), summary: Optional(summary)) }
+        let transcript = (0..<300).map { "[10:\(String(format: "%02d", $0 % 60)):00] You: and then we talked about the garage and the dentist again" }.joined(separator: "\n")
+        let earlier = "Earlier I asked: What did we decide about the garage?\nYou answered: " + String(repeating: "You'll take the car in on Thursday. ", count: 40)
+        for budget in [2_800, 1_800] {
+            let prompt = Prompts.focused(question: "And what did she say?", notes: notes, best: ("Today 10:00", transcript),
+                                         now: Date(), earlier: earlier, budget: budget)
+            XCTAssertLessThanOrEqual(Prompts.tokens(prompt), budget + 20, "budget \(budget)")
+            XCTAssertTrue(prompt.contains("Earlier I asked: What did we decide about the garage?"))
+            XCTAssertTrue(prompt.hasSuffix("My question: And what did she say?"))
+        }
+        let plain = Prompts.focused(question: "Q?", notes: [("Today 10:00", "Garage", nil)], best: nil, now: Date())
+        XCTAssertFalse(plain.contains("Earlier I asked"))
+    }
+}
+
+final class AboutTodayTests: XCTestCase {
+    func testOnlyTodayIsTodaysRecap() {
+        XCTAssertTrue(Prompts.isAboutToday("Summarise my day so far"))
+        XCTAssertTrue(Prompts.isAboutToday("What did I do today?"))
+        XCTAssertFalse(Prompts.isAboutToday("Summarise yesterday"))
+        XCTAssertFalse(Prompts.isAboutToday("Recap Friday's meeting"))
+        XCTAssertFalse(Prompts.isAboutToday("Tell me everything about Mum's birthday"))
+        XCTAssertFalse(Prompts.isAboutToday("Summarise what Sarah said so far"))
     }
 }
