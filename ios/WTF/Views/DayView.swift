@@ -72,11 +72,12 @@ struct YourDayRow: View {
         }
     }
 
-    /// "2 decided · 3 to do · 1 left hanging".
+    /// "2 decided · 3 to-dos · 1 left hanging", in the same words as Lists.
     static func counts(_ notes: [DayNote]) -> String {
+        let todo = DayReview.gather(notes, limit: 99) { $0.todo }.count
         let parts = [
             (DayReview.gather(notes, limit: 99) { $0.decided }.count, "decided"),
-            (DayReview.gather(notes, limit: 99) { $0.todo }.count, "to do"),
+            (todo, todo == 1 ? "to-do" : "to-dos"),
             (DayReview.gather(notes, limit: 99) { $0.hanging }.count, "left hanging"),
         ]
         return parts.filter { $0.0 > 0 }.map { "\($0.0) \($0.1)" }.joined(separator: " \u{00B7} ")
@@ -110,7 +111,8 @@ struct DayView: View {
                 Text(dayLabel(day))
             }
             items("Decided", icon: "checkmark.circle", DayReview.gather(notes, limit: 40) { $0.decided })
-            items("To Do", icon: "circle", DayReview.gather(notes, limit: 40) { $0.todo })
+            // Not an empty circle: that's Lists' tick box, and these open where they were said.
+            items("To-dos", icon: "arrow.right.circle", DayReview.gather(notes, limit: 40) { $0.todo })
             items("Left Hanging", icon: "ellipsis.bubble", DayReview.gather(notes, limit: 40) { $0.hanging })
             if !conversations.isEmpty {
                 Section("Conversations") {

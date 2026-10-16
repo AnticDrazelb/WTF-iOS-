@@ -42,6 +42,8 @@ final class LiveTranscriber: @unchecked Sendable {
     private var finalThrough = 0.0
     /// When it started listening: recordings from before are transcribed from the file.
     private var since: Date?
+    /// Recordings the recorder threw away (coughs, doors): words still to come from them are dropped.
+    private var dropped: [Date] = []
 
     private let source = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: rate, channels: 1, interleaved: false)!
 
@@ -65,6 +67,9 @@ final class LiveTranscriber: @unchecked Sendable {
             } catch {
                 Log.error("Live transcription stopped", error)
             }
+            // Nothing's listening to it any more: let it go, so recordings go straight to their
+            // files instead of each waiting for words that won't come.
+            await self?.stopIfCurrent(analyzer)
         }
         locked {
             self.analyzer = analyzer
@@ -79,12 +84,42 @@ final class LiveTranscriber: @unchecked Sendable {
             provisional = []
             finalThrough = 0
             since = Date()
+            dropped = []
         }
         Task { [weak self] in
             do { try await analyzer.start(inputSequence: stream) } catch {
                 Log.error("Live transcription couldn't start", error)
-                await self?.stop()
+                await self?.stopIfCurrent(analyzer)
             }
+        }
+    }
+
+    /// Stops it, unless it's already been stopped and another started since.
+    private func stopIfCurrent(_ analyzer: SpeechAnalyzer) async {
+        guard locked({ self.analyzer === analyzer }) else { return }
+        await stop()
+    }
+
+    /// Something was deleted: the words heard so far go, so nothing deleted is answered from.
+    /// Recordings already begun are transcribed from their files instead. The sample count stays,
+    /// so later words are still placed right.
+    func forget() {
+        locked {
+            words = []
+            provisional = []
+            ends = [:]
+            anchors = [(fed, Date.distantPast, 0)] // what was fed before belongs to no recording now
+        }
+    }
+
+    /// The recorder threw away the recording that started at [chunk]: its words go.
+    func drop(chunk: Date) {
+        locked {
+            words.removeAll { Self.same($0.chunk, chunk) }
+            provisional.removeAll { Self.same($0.chunk, chunk) }
+            ends = ends.filter { !Self.same($0.key, chunk) }
+            dropped.append(chunk)
+            if dropped.count > 20 { dropped.removeFirst(dropped.count - 20) }
         }
     }
 
@@ -173,7 +208,7 @@ final class LiveTranscriber: @unchecked Sendable {
         let timed = result.words
         lock.lock(); defer { lock.unlock() }
         let placed = timed.compactMap { w -> TimedWord? in
-            guard let p = place(w.start), p.chunk != .distantPast else { return nil }
+            guard let p = place(w.start), p.chunk != .distantPast, !dropped.contains(where: { Self.same($0, p.chunk) }) else { return nil }
             return TimedWord(chunk: p.chunk, start: p.at, end: p.at + max(0, w.end - w.start), text: w.text,
                              confidence: w.confidence, alternatives: w.alternatives)
         }
@@ -209,6 +244,8 @@ final class LiveTranscriber: @unchecked Sendable {
             try? await Task.sleep(for: .milliseconds(50))
         }
         return locked {
+            // Forgotten or thrown away meanwhile: the file's used instead.
+            guard ends.contains(where: { Self.same($0.key, from) }) else { return nil }
             let mine = words.filter { Self.same($0.chunk, from) }
             words.removeAll { $0.chunk <= from.addingTimeInterval(0.001) }
             ends = ends.filter { $0.key > from.addingTimeInterval(0.001) }

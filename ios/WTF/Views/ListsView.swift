@@ -12,6 +12,8 @@ struct ListsView: View {
     @State private var drafts: [String: String] = [:]
     @State private var ticking: Set<UUID> = []
     @State private var calendarItem: ActionItem?
+    /// Ticked items too, at the bottom of each list, so one ticked by mistake can be put back.
+    @AppStorage("listsShowCompleted") private var showCompleted = false
 
     private struct ListGroup: Identifiable {
         var id: String, title: String, icon: String, empty: String, canAdd: Bool
@@ -29,11 +31,12 @@ struct ListsView: View {
             (a.start ?? .distantFuture, b.created) < (b.start ?? .distantFuture, a.created)
         }
     }
+    private func completed(_ type: String) -> [ActionItem] { items.filter { $0.status == "done" && $0.type == type } }
 
     var body: some View {
         NavigationStack {
             List {
-                Text("Heard today and kept for later. Nothing goes on a list until you say so.")
+                Text("What WTF hears you mention waits here. Nothing goes on a list until you add it.")
                     .font(.subheadline).foregroundStyle(.secondary)
                     .listRowBackground(Color.clear)
                     .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 4, trailing: 20))
@@ -41,7 +44,16 @@ struct ListsView: View {
             }
             .animation(.snappy, value: items.map(\.status))
             .navigationTitle("Lists")
-            .toolbar { ToolbarItem(placement: .topBarLeading) { ListeningButton() } }
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) { ListeningButton() }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Toggle("Show Completed", systemImage: "checkmark.circle", isOn: $showCompleted)
+                    } label: {
+                        Label("More", systemImage: "ellipsis")
+                    }
+                }
+            }
             .sheet(item: $calendarItem) { item in
                 EventEditor(item: item) { saved in
                     if saved { item.status = "accepted"; save() }
@@ -58,6 +70,14 @@ struct ListsView: View {
         Section {
             ForEach(waiting) { s in
                 SuggestionRow(item: s, onAccept: { accept(s) }, onDismiss: { s.status = "dismissed"; save() })
+                    // As the kept items below: swipe it away, or swipe the other way to add it.
+                    .swipeActions(edge: .trailing) {
+                        Button("Dismiss", systemImage: "xmark", role: .destructive) { s.status = "dismissed"; save() }
+                    }
+                    .swipeActions(edge: .leading) {
+                        Button(s.type == "EVENT" ? "Add to Calendar" : "Add", systemImage: "plus") { accept(s) }
+                            .tint(.gray)
+                    }
             }
             ForEach(kept) { item in
                 CheckRow(item: item, ticking: ticking.contains(item.id)) { tick(item) }
@@ -73,6 +93,16 @@ struct ListsView: View {
                 for i in offsets { kept[i].status = "dismissed" } // kept as dismissed, so it isn't suggested again
                 save()
             }
+            if showCompleted {
+                let done = completed(group.id)
+                ForEach(done) { item in
+                    CheckRow(item: item, ticking: false, done: true) { item.status = "accepted"; save() }
+                }
+                .onDelete { offsets in
+                    for i in offsets { done[i].status = "dismissed" }
+                    save()
+                }
+            }
             if group.canAdd {
                 HStack(spacing: 14) {
                     Image(systemName: "plus.circle").font(.title2).foregroundStyle(.tertiary)
@@ -80,7 +110,7 @@ struct ListsView: View {
                         get: { drafts[group.id] ?? "" }, set: { drafts[group.id] = $0 }))
                         .onSubmit { add(group.id) }
                 }
-            } else if waiting.isEmpty && kept.isEmpty {
+            } else if waiting.isEmpty && kept.isEmpty && !(showCompleted && !completed(group.id).isEmpty) {
                 Text(group.empty).font(.subheadline).foregroundStyle(.secondary)
             }
         } header: {
@@ -158,9 +188,10 @@ struct SuggestionRow: View {
                     }
                     .padding(.top, 2)
                 }
-                HStack {
-                    Button(item.type == "EVENT" ? "Add to Calendar" : "Add", action: onAccept).buttonStyle(.bordered)
-                    Button("Dismiss", action: onDismiss).buttonStyle(.borderless).foregroundStyle(.secondary)
+                // Side by side, or one above the other when large text wouldn't fit them.
+                ViewThatFits(in: .horizontal) {
+                    HStack { addButton; dismissButton }
+                    VStack(alignment: .leading, spacing: 8) { addButton; dismissButton }
                 }
                 .buttonBorderShape(.capsule)
                 .padding(.top, 4)
@@ -169,27 +200,39 @@ struct SuggestionRow: View {
         .padding(.vertical, 4)
     }
 
+    private var addButton: some View {
+        Button(item.type == "EVENT" ? "Add to Calendar" : "Add", action: onAccept).buttonStyle(.bordered)
+    }
+
+    private var dismissButton: some View {
+        Button("Dismiss", action: onDismiss).buttonStyle(.borderless).foregroundStyle(.secondary)
+    }
 }
 
-/// A Reminders row: the ring fills with a dot when ticked.
+/// A Reminders row: the ring fills with a dot when ticked. A completed one (Show Completed)
+/// stays filled, and a tap puts it back on the list.
 struct CheckRow: View {
     let item: ActionItem
     let ticking: Bool
+    var done = false
     let onTick: () -> Void
+
+    private var filled: Bool { ticking || done }
 
     var body: some View {
         HStack(spacing: 14) {
             Button(action: onTick) {
-                Image(systemName: ticking ? "largecircle.fill.circle" : "circle")
+                Image(systemName: filled ? "largecircle.fill.circle" : "circle")
                     .font(.title2)
-                    .foregroundStyle(ticking ? Color.primary : Color.secondary)
+                    .foregroundStyle(filled ? Color.primary : Color.secondary)
                     .contentTransition(.symbolEffect(.replace))
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Done")
+            .accessibilityLabel(done ? "Mark \(item.title) as not done" : "Mark \(item.title) as done")
+            .accessibilityValue(filled ? "Done" : "")
             .sensoryFeedback(.success, trigger: ticking) { _, now in now }
             VStack(alignment: .leading, spacing: 2) {
-                Text(item.title).foregroundStyle(ticking ? .secondary : .primary)
+                Text(item.title).foregroundStyle(filled ? .secondary : .primary)
                 if let d = detail(item) { Text(d).font(.footnote).foregroundStyle(.secondary) }
                 if let note = item.note, item.type == "EVENT" { NoteBadge(note: note) }
             }

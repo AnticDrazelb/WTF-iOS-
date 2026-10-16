@@ -42,6 +42,8 @@ final class Standby {
         ready = nil
         generation += 1
         ReadAloud.shared.forget()
+        // The words just heard too: a press straight after would otherwise answer from them.
+        LiveTranscriber.shared.forget()
     }
 
     /// For a press: the kept answer if nothing's been said since; otherwise one worked out now

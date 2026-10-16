@@ -38,14 +38,16 @@ public enum QuickRecap {
     }
 
     /// The thread you lost: a sentence that broke off, else the last real say (yours, if known).
+    /// If you've said nothing lately, someone else's: what was heard is better than nothing.
     static func pick(_ turns: [Turn], ownerKnown: Bool) -> Int? {
         let recent = max(0, turns.count - 12)
-        func mine(_ i: Int) -> Bool { !ownerKnown || turns[i].who == Labels.me }
-        func find(_ test: (Turn) -> Bool) -> Int? {
+        func look(mine: Bool, _ test: (Turn) -> Bool) -> Int? {
             guard !turns.isEmpty else { return nil }
-            return stride(from: turns.count - 1, through: recent, by: -1).first { mine($0) && test(turns[$0]) }
+            return stride(from: turns.count - 1, through: recent, by: -1).first { (!mine || turns[$0].who == Labels.me) && test(turns[$0]) }
         }
+        func find(_ test: (Turn) -> Bool) -> Int? { look(mine: ownerKnown, test) }
         return find({ $0.cutOff && $0.words >= 4 }) ?? find({ $0.words >= 6 }) ?? find({ _ in true })
+            ?? look(mine: false, { $0.words >= 6 }) ?? look(mine: false, { _ in true })
     }
 
     /// The same, short enough to be read out in your ear (Siri, AirPods).
@@ -60,7 +62,7 @@ public enum QuickRecap {
         var out: String
         if anonymous {
             out = "The last thing said, \(said), was: \(quote)"
-        } else if ownerKnown {
+        } else if main.who == Labels.me {
             out = "You were saying, \(said): \(quote)"
         } else {
             let who = name(main.who)
@@ -77,7 +79,8 @@ public enum QuickRecap {
     /// - Parameters:
     ///   - transcript: a conversation's lines.
     ///   - start: when it began (lines only carry the time of day).
-    public static func of(_ transcript: String, start: Date, now: Date, calendar: Calendar = .current) -> String? {
+    ///   - tip: whether to say how to mark your voice, if it isn't known (once is enough).
+    public static func of(_ transcript: String, start: Date, now: Date, calendar: Calendar = .current, tip: Bool = true) -> String? {
         let (turns, ownerKnown, anonymous) = parse(transcript, start: start, calendar: calendar)
         guard let i = pick(turns, ownerKnown: ownerKnown) else { return nil }
         let main = turns[i]
@@ -86,8 +89,9 @@ public enum QuickRecap {
         if anonymous {
             out = said.hasPrefix("at ") ? "At \(said.dropFirst(3)), the last thing said was:" : "Last thing said, \(said):"
         } else {
-            let who = ownerKnown ? "you" : name(main.who)
-            let verb = ownerKnown ? "were" : "was"
+            let mine = main.who == Labels.me
+            let who = mine ? "you" : name(main.who)
+            let verb = mine ? "were" : "was"
             out = said.hasPrefix("at ") ? "At \(said.dropFirst(3)) \(who) \(verb) saying:" : "\(who.prefix(1).uppercased() + who.dropFirst()) \(verb) saying, \(said):"
         }
         out += "\n\u{201C}\(quote(main.text))\u{201D}"
@@ -99,7 +103,7 @@ public enum QuickRecap {
                 let before = turns[i - 1]
                 out += "\n\nJust before, \(name(before.who)) said: \u{201C}\(quote(before.text, max: 120))\u{201D}"
             }
-            if !ownerKnown { out += "\n\nTap your name in a transcript and choose That\u{2019}s Me, and WTF will know which voice is yours." }
+            if !ownerKnown, tip { out += "\n\nTap your name in a transcript and choose That\u{2019}s Me, and WTF will know which voice is yours." }
         }
         return out
     }
@@ -116,12 +120,16 @@ public enum QuickRecap {
         case ..<120: return "a minute ago"
         case ..<3600: return "\(s / 60) minutes ago"
         default:
-            let c = calendar.dateComponents([.hour, .minute], from: at)
-            let time = String(format: "at %02d:%02d", c.hour!, c.minute!)
+            // The person's own clock (12- or 24-hour), from [calendar]'s locale.
+            let clock = DateFormatter()
+            clock.calendar = calendar; clock.timeZone = calendar.timeZone; clock.locale = calendar.locale ?? .current
+            clock.dateStyle = .none; clock.timeStyle = .short
+            let time = "at " + clock.string(from: at)
             // Not today: which day, so yesterday's isn't taken for just now.
             if calendar.isDate(at, inSameDayAs: now) { return time }
             if let yesterday = calendar.date(byAdding: .day, value: -1, to: now), calendar.isDate(at, inSameDayAs: yesterday) { return "yesterday " + time }
-            let f = DateFormatter(); f.calendar = calendar; f.locale = Locale(identifier: "en_GB"); f.dateFormat = "EEEE d MMMM"
+            let f = DateFormatter(); f.calendar = calendar; f.timeZone = calendar.timeZone; f.locale = calendar.locale ?? .current
+            f.setLocalizedDateFormatFromTemplate("EEEEdMMMM")
             return "on \(f.string(from: at)) " + time
         }
     }

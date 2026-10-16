@@ -31,8 +31,10 @@ struct AskControl: ControlWidget {
 struct ListeningControl: ControlWidget {
     var body: some ControlWidgetConfiguration {
         StaticControlConfiguration(kind: "com.wtf.ios.control.listening") {
+            // A button, not a toggle: the extension can't see whether WTF's listening, so it
+            // says what it does rather than looking on or off.
             ControlWidgetButton(action: WTFListeningControlIntent()) {
-                Label("WTF Listening", systemImage: "waveform")
+                Label("Listening On or Off", systemImage: "waveform")
             }
         }
         .displayName("Start or Stop Listening")
@@ -72,11 +74,11 @@ struct CardBody: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let answer = state.answer {
-                // Four smaller lines: enough for a spoken recap, within iOS's 160 points.
+                // Three smaller lines: enough for a spoken recap, within iOS's 160 points.
                 Text(answer)
                     .font(.footnote)
                     .foregroundStyle(.white)
-                    .lineLimit(4)
+                    .lineLimit(3)
                     .minimumScaleFactor(0.8)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 HStack(spacing: 8) {
@@ -106,7 +108,7 @@ struct PillControls: View {
                 CapsuleButton(intent: WTFBeforeControlIntent(), icon: "backward.fill", label: "Before")
             }
             if state.heard {
-                CapsuleButton(intent: WTFAskControlIntent(), icon: "questionmark", label: "What was I saying?", prominent: true)
+                CapsuleButton(intent: WTFAskControlIntent(), icon: "questionmark.bubble", label: "What was I saying?", prominent: true)
                     .layoutPriority(1)
             }
             CapsuleButton(intent: WTFStopControlIntent(), icon: "stop.fill", label: "Stop")
@@ -151,37 +153,58 @@ struct ListeningLiveActivity: Widget {
             }
                 .activityBackgroundTint(Look.glass)
                 .activitySystemActionForegroundColor(.white)
-                .widgetURL(URL(string: "wtf://ask"))
+                // Stale, a tap just opens WTF, which carries on listening as it opens: no question,
+                // and no sheet offering to stop what it's only just started again.
+                .widgetURL(context.isStale ? nil : URL(string: "wtf://ask"))
         } dynamicIsland: { context in
             let s = context.state
+            // WTF stopped updating it (closed, or crashed): nothing in the pill may say it's listening.
+            let stale = context.isStale
             return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    Label("Listening", systemImage: "waveform")
+                    Label(stale ? "Not listening" : "Listening", systemImage: stale ? "mic.slash" : "waveform")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.white)
                         .padding(.leading, 4)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    Elapsed(since: s.since, font: .subheadline).frame(width: 60, alignment: .trailing).padding(.trailing, 4)
+                    if !stale {
+                        Elapsed(since: s.since, font: .subheadline).frame(width: 60, alignment: .trailing).padding(.trailing, 4)
+                    }
                 }
                 DynamicIslandExpandedRegion(.center) {
                     // With an answer showing, the topic gives it its line: no empty line left either.
-                    if context.isStale {
-                        Text("Not listening").font(.headline).lineLimit(1)
-                    } else if s.answer == nil, let topic = s.topic {
+                    if !stale, s.answer == nil, let topic = s.topic {
                         Text(topic).font(.headline).lineLimit(1)
                     }
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    CardBody(state: s, inIsland: true).padding(.top, 4)
+                    if stale {
+                        // Stop only ever stops, so it's safe from a card left behind.
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Open WTF to carry on.")
+                                .font(.subheadline)
+                                .foregroundStyle(Look.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            CapsuleButton(intent: WTFStopControlIntent(), icon: "stop.fill", label: "Stop")
+                        }
+                        .padding(.top, 4)
+                    } else {
+                        CardBody(state: s, inIsland: true).padding(.top, 4)
+                            .dynamicTypeSize(...DynamicTypeSize.xLarge)
+                    }
                 }
             } compactLeading: {
-                ListeningMark(font: .caption).padding(.leading, 2)
+                ListeningMark(font: .caption, stale: stale).padding(.leading, 2)
             } compactTrailing: {
                 // A fixed width: a running time left to size itself fills the whole island.
-                Elapsed(since: s.since, font: .caption2, alignment: .center).frame(width: 40)
+                if stale {
+                    Color.clear.frame(width: 40)
+                } else {
+                    Elapsed(since: s.since, font: .caption2, alignment: .center).frame(width: 40)
+                }
             } minimal: {
-                ListeningMark(font: .caption)
+                ListeningMark(font: .caption, stale: stale)
             }
             // A tap on the pill opens WTF to stop listening; holding it shows the buttons.
             .widgetURL(URL(string: "wtf://listening"))
@@ -191,12 +214,14 @@ struct ListeningLiveActivity: Widget {
     }
 }
 
-/// The waveform from WTF's own Listen button, wherever the card or the pill shows.
+/// The waveform from WTF's own Listen button, wherever the card or the pill shows; the crossed-out
+/// microphone once WTF has stopped updating it ([stale]), as on the card.
 struct ListeningMark: View {
     var font: Font = .subheadline
+    var stale = false
 
     var body: some View {
-        Image(systemName: "waveform")
+        Image(systemName: stale ? "mic.slash" : "waveform")
             .font(font.weight(.semibold))
             .foregroundStyle(.white)
     }
@@ -230,13 +255,14 @@ struct LockScreenCard: View {
                 HStack(spacing: 5) { ListeningMark(font: .caption2); Elapsed(since: state.since, font: .caption2, alignment: .leading).frame(width: 44, alignment: .leading) }
                 Text(state.topic ?? "Listening").font(.headline).lineLimit(2)
                 if state.hanging > 0 {
-                    Text("\(state.hanging) left hanging").font(.caption2).foregroundStyle(.secondary)
+                    Text("\(state.hanging) left hanging").font(.caption2).foregroundStyle(Look.secondary)
                 }
             }
             .padding(8)
         } else {
             // Kept under iOS's 160 points: heading, then the trail and the buttons, or an answer
-            // (which takes the topic's place) and its buttons: 12 + 22 + 8 + 64 + 8 + 34 + 12 at most.
+            // (which takes the topic's place) and its buttons: 12 + 22 + 8 + 54 + 8 + 34 + 12 at most,
+            // with text sizes capped so the largest don't push the buttons off.
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
                     ListeningMark()
@@ -248,6 +274,7 @@ struct LockScreenCard: View {
                 CardBody(state: state)
             }
             .padding(12)
+            .dynamicTypeSize(...DynamicTypeSize.xLarge)
         }
     }
 }
@@ -259,7 +286,7 @@ struct Trail: View {
     var body: some View {
         HStack(spacing: 4) {
             ForEach(Array(steps.enumerated()), id: \.offset) { i, step in
-                if i > 0 { Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.secondary) }
+                if i > 0 { Image(systemName: "chevron.right").font(.caption2).foregroundStyle(Look.secondary) }
                 Text(step.title)
                     .font(.caption.weight(step.current ? .semibold : .regular))
                     .lineLimit(1)

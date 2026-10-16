@@ -18,6 +18,8 @@ final class Recorder: @unchecked Sendable {
     var onResumed: (() -> Void)?
     /// The mic stopped by itself (a call took it, or the audio system restarted and it couldn't resume).
     var onStopped: (() -> Void)?
+    /// A recording thrown away as a cough or a door (its start), so its live words go too.
+    var onDiscard: ((Date) -> Void)?
 
     /// A new one for every start (see freshEngine). Swapped only with [sessionLock] held, and
     /// under [infoLock] too, for [stalled] to read from anywhere.
@@ -28,7 +30,6 @@ final class Recorder: @unchecked Sendable {
     private var retired: AVAudioEngine?
     private let queue = DispatchQueue(label: "wtf.recorder")
     private let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
-    private var converter: AVAudioConverter?
     /// Listening's on. Set only with [sessionLock] held, and under [infoLock] too, so it can be
     /// read from any thread (the audio notifications, the app, the intents).
     var running: Bool {
@@ -225,7 +226,18 @@ final class Recorder: @unchecked Sendable {
     }
 
     /// Starts the mic again after something took it. Safe to call any time listening is on.
+    /// If the microphone's still busy or mid-switch, it tries again a few times, waiting longer
+    /// each time: iOS says an interruption's over only once, and a route change only once.
     func resume(why: String) {
+        infoLock.lock(); retries += 1; let mine = retries; infoLock.unlock()
+        resume(why: why, attempt: 0, mine: mine)
+    }
+
+    /// Bumped by each fresh resume, so only the newest one keeps trying.
+    private var retries = 0
+    private static let delays: [Double] = [0.5, 1, 2, 4, 8, 16]
+
+    private func resume(why: String, attempt: Int, mine: Int) {
         guard running else { return }
         do {
             try restart()
@@ -233,7 +245,39 @@ final class Recorder: @unchecked Sendable {
             onResumed?()
         } catch {
             Log.error("Couldn't resume listening \(why)", error)
+            guard running else { return }
+            if attempt < Self.delays.count {
+                // Not on [queue]: stop() waits on it while holding the session lock.
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + Self.delays[attempt]) { [weak self] in
+                    guard let self, self.stalled else { return }
+                    self.infoLock.lock(); let newest = self.retries == mine; self.infoLock.unlock()
+                    guard newest else { return }
+                    self.resume(why: why, attempt: attempt + 1, mine: mine)
+                }
+            } else if !Self.busy(error) {
+                // Still no microphone half a minute on, and not for a call: stopped, and the user's told.
+                giveUp()
+            }
+            // A call or Siri still has it: stays paused until the interruption ends or WTF's opened.
         }
+    }
+
+    /// A call or Siri has the microphone.
+    private static func busy(_ error: Error) -> Bool {
+        [MicTrouble.code("!pri"), MicTrouble.code("siri"), MicTrouble.code("!int")].contains((error as NSError).code)
+    }
+
+    /// Listening couldn't be got back: stopped for good, the microphone let go.
+    private func giveUp() {
+        sessionLock.lock()
+        guard running, !engine.isRunning else { sessionLock.unlock(); return }
+        setRunning(false)
+        engine.inputNode.removeTap(onBus: 0)
+        engine.stop()
+        queue.sync { closeChunk(cut: false) }
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        sessionLock.unlock()
+        onStopped?()
     }
 
     /// Ends the chunk being recorded now, so a question includes the last few seconds.
@@ -254,16 +298,10 @@ final class Recorder: @unchecked Sendable {
             freshEngine()
             try installTap()
         } catch {
-            // A call or Siri has the microphone: still listening, just stalled; it comes back when
-            // the interruption ends (or WTF's opened again), rather than stopping for good.
-            let code = (error as NSError).code
-            if [MicTrouble.code("!pri"), MicTrouble.code("siri"), MicTrouble.code("!int")].contains(code) {
-                Log.info("The microphone's busy (a call or Siri); listening carries on when it's free")
-                throw error
-            }
-            setRunning(false)
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-            onStopped?()
+            // A call or Siri has the microphone, or it's mid-switch (AirPods going in or out, iOS
+            // restarting its sound system): still listening, just stalled. resume tries again
+            // shortly, and stops for good only if it never comes back.
+            Log.info("The microphone's busy or switching; listening carries on when it's free")
             throw error
         }
     }
@@ -281,10 +319,11 @@ final class Recorder: @unchecked Sendable {
         // A tap at any other rate than the hardware's crashes.
         let given = input.outputFormat(forBus: 0)
         let format = Self.usable(given) && given.sampleRate == hardware.sampleRate ? given : hardware
-        converter = AVAudioConverter(from: format, to: target)
+        // Each tap has its own converter, so a restart can't swap it out from under a buffer.
+        let converter = AVAudioConverter(from: format, to: target)
         // A tenth of a second at a time: few wake-ups, all day.
         input.installTap(onBus: 0, bufferSize: AVAudioFrameCount(format.sampleRate / 10), format: format) { [weak self] buffer, _ in
-            guard let self, let samples = self.resample(buffer) else { return }
+            guard let self, let converter, let samples = self.resample(buffer, with: converter) else { return }
             let heard = Date()
             self.queue.async { self.consume(samples, at: heard) }
         }
@@ -299,8 +338,7 @@ final class Recorder: @unchecked Sendable {
 
     private static func usable(_ format: AVAudioFormat) -> Bool { format.sampleRate > 0 && format.channelCount > 0 }
 
-    private func resample(_ buffer: AVAudioPCMBuffer) -> [Float]? {
-        guard let converter else { return nil }
+    private func resample(_ buffer: AVAudioPCMBuffer, with converter: AVAudioConverter) -> [Float]? {
         let capacity = AVAudioFrameCount(Double(buffer.frameLength) * target.sampleRate / buffer.format.sampleRate) + 32
         guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return nil }
         var fed = false
@@ -401,6 +439,7 @@ final class Recorder: @unchecked Sendable {
         // Hardly any speech is a cough or a door, except right after a cut: then it's the end of a sentence.
         if speechFrames * Self.frameMs < ChunkRules.minSpeechMs && !continuing {
             try? FileManager.default.removeItem(at: url)
+            onDiscard?(chunkStart)
             return
         }
         if cut { cutAt = now }

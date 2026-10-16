@@ -135,8 +135,10 @@ final class ListeningActivity {
         let mine = answers
         state.answer = String(text.prefix(280))
         let content = ActivityContent(state: state, staleDate: Self.fresh)
+        // With headphones in it's being read aloud already: no alert sound over the voice.
+        let alert = ReadAloud.headphonesOn ? nil : AlertConfiguration(title: "WTF", body: "\(text)", sound: .default)
         Task {
-            await current.update(content, alertConfiguration: AlertConfiguration(title: "WTF", body: "\(text)", sound: .default))
+            await current.update(content, alertConfiguration: alert)
             try? await Task.sleep(for: .seconds(90))
             guard mine == answers, let now = activity else { return }
             state.answer = nil

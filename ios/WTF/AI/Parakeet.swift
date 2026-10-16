@@ -24,17 +24,28 @@ actor Parakeet {
 
     private var manager: AsrManager?
     private var loading: Task<AsrManager, Error>?
+    /// Everyone waiting on the download, told how far it's got.
+    private var watching = Watchers()
+    /// One recording at a time: the model isn't made to be used by two at once, and each lets
+    /// go of it when done (a transcription can outlast the wait for it).
+    private var queue: Task<Void, Never>?
+    private var transcribing = false
 
     /// Downloads the model the first time (reporting how far it's got, 0–1), then loads it.
     func prepare(progress: (@Sendable (Double) -> Void)? = nil) async throws {
         guard manager == nil else { return }
-        // One at a time: a second ask (Settings, while a conversation's being heard again) waits.
+        // One at a time: a second ask (Settings, while a conversation's being heard again) waits,
+        // and is told how far it's got too.
         if let loading {
+            if let progress { watching.add(progress) }
             _ = try await loading.value
             return
         }
+        let watching = Watchers()
+        if let progress { watching.add(progress) }
+        self.watching = watching
         let job = Task { () throws -> AsrManager in
-            let models = try await AsrModels.downloadAndLoad(version: .v2, progressHandler: { p in progress?(p.fractionCompleted) })
+            let models = try await AsrModels.downloadAndLoad(version: .v2, progressHandler: { p in watching.send(p.fractionCompleted) })
             let m = AsrManager(config: .default)
             try await m.loadModels(models)
             return m
@@ -55,9 +66,28 @@ actor Parakeet {
     /// The words in a recording (16 kHz), each with when it was said (seconds from the start) and
     /// how sure the model was. The model's let go of afterwards: it's large, and WTF runs all day.
     func words(_ url: URL) async throws -> [SpeakerAlign.Word] {
+        let before = queue
+        let job = Task { () throws -> [SpeakerAlign.Word] in
+            await before?.value
+            return try await self.wordsNow(url)
+        }
+        queue = Task { _ = try? await job.value }
+        // Given up on (secondPass's deadline): told to stop, so the next isn't kept waiting.
+        return try await withTaskCancellationHandler {
+            try await job.value
+        } onCancel: {
+            job.cancel()
+        }
+    }
+
+    private func wordsNow(_ url: URL) async throws -> [SpeakerAlign.Word] {
         try await prepare()
         guard let manager else { throw NotLoaded() }
-        defer { unload() }
+        transcribing = true
+        defer {
+            transcribing = false
+            release()
+        }
         var state = TdtDecoderState.make(decoderLayers: await manager.decoderLayerCount)
         let result = try await manager.transcribe(url, decoderState: &state)
         return Self.words(from: result.tokenTimings ?? [])
@@ -65,17 +95,48 @@ actor Parakeet {
 
     /// Switched off in Settings: the download goes, to give the space back.
     func remove() async {
-        unload()
+        await queue?.value
+        release()
         try? FileManager.default.removeItem(at: AsrModels.defaultCacheDirectory(for: .v2))
         UserDefaults.standard.set(false, forKey: "parakeetDownloaded")
         Log.info("Better Accuracy model removed")
     }
 
-    /// Lets go of the model (it's loaded again when a conversation needs it).
+    /// Lets go of the model (it's loaded again when a conversation needs it), unless a
+    /// conversation's using it: it's let go of when that's done.
     func unload() {
+        guard !transcribing else { return }
+        release()
+    }
+
+    private func release() {
         let m = manager
         manager = nil
         Task { await m?.cleanup() }
+    }
+
+    /// How far the download's got, passed on to everyone waiting on it, the ones who asked later
+    /// told where it's got to so far.
+    private final class Watchers: @unchecked Sendable {
+        private let lock = NSLock()
+        private var handlers: [@Sendable (Double) -> Void] = []
+        private var last: Double?
+
+        func add(_ handler: @escaping @Sendable (Double) -> Void) {
+            lock.lock()
+            handlers.append(handler)
+            let last = last
+            lock.unlock()
+            if let last { handler(last) }
+        }
+
+        func send(_ fraction: Double) {
+            lock.lock()
+            last = fraction
+            let all = handlers
+            lock.unlock()
+            all.forEach { $0(fraction) }
+        }
     }
 
     struct NotLoaded: LocalizedError {

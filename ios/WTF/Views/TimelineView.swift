@@ -11,15 +11,21 @@ struct TimelineView: View {
     @State private var deleting: Conversation?
     @State private var renaming: Conversation?
     @State private var newTitle = ""
+    /// What the search found, worked out once typing pauses: not on every keystroke, as a week
+    /// of transcripts runs to megabytes. Nil until the first search has finished.
+    @State private var matches: Set<PersistentIdentifier>?
 
     private var shown: [Conversation] {
         // Not ones being deleted: a row left showing one as it goes would crash the app.
         let visible = conversations.filter { !model.hiding.contains($0.persistentModelID) }
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        guard q.count >= 2 else { return visible }
-        return visible.filter { c in
-            [c.title, c.summary, c.transcript].contains { $0?.lowercased().contains(q) == true }
-        }
+        guard searching, let matches else { return visible }
+        return visible.filter { matches.contains($0.persistentModelID) }
+    }
+
+    private func search(_ q: String) -> Set<PersistentIdentifier> {
+        Set(conversations.filter { c in
+            [c.title, c.summary, c.transcript].contains { $0?.localizedStandardContains(q) == true }
+        }.map(\.persistentModelID))
     }
 
     /// The days, newest first, each with its conversations.
@@ -87,19 +93,26 @@ struct TimelineView: View {
                 }
             }
             .searchable(text: $query, prompt: "Search everything you've heard")
-            .refreshable { await model.pipeline.run() }
+            .task(id: "\(query)|\(conversations.count)") {
+                let q = query.trimmingCharacters(in: .whitespaces)
+                guard q.count >= 2 else { matches = nil; return }
+                try? await Task.sleep(for: .milliseconds(200))
+                guard !Task.isCancelled else { return }
+                matches = search(q)
+            }
+            // The latest words, not the summaries and second hearing queued behind them: those
+            // carry on afterwards, so the spinner doesn't wait a minute for them.
+            .refreshable {
+                Recorder.shared.flush()
+                await model.pipeline.catchUp()
+                model.processNow()
+            }
             .navigationTitle("Timeline")
             .alert("Rename", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
                 TextField("Title", text: $newTitle)
                 Button("Cancel", role: .cancel) {}
-                Button("Save") {
-                    let t = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if let c = renaming, !t.isEmpty {
-                        c.title = t
-                        if c.summary == nil { c.summary = "" } // named by you: not summarised over
-                        try? c.modelContext?.save()
-                    }
-                }
+                Button("Save") { if let c = renaming { renameConversation(c, to: newTitle) } }
+                    .disabled(newTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             .confirmationDialog("Delete this conversation?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
                 Button("Delete", role: .destructive) {
@@ -275,7 +288,12 @@ struct ConversationView: View {
     @State private var naming: String?
     @State private var typed = ""
     @State private var note: String?
+    /// Why naming a voice or fixing words didn't work: an alert, as the footer's below the
+    /// whole transcript and out of sight.
+    @State private var failure: String?
     @State private var saved = 0
+    @State private var renaming = false
+    @State private var newTitle = ""
     /// The line being fixed, and its words as they're being edited.
     @State private var fixing: String?
     @State private var fixedText = ""
@@ -286,19 +304,20 @@ struct ConversationView: View {
     var body: some View {
         List {
             Section {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(displayTitle(conversation)).font(.title2.bold())
-                    Text("\(dayLabel(conversation.start)), \(conversation.start.formatted(date: .omitted, time: .shortened))\u{2013}\(conversation.end.formatted(date: .omitted, time: .shortened))")
-                        .font(.subheadline).foregroundStyle(.secondary)
-                }
-                .listRowBackground(Color.clear)
+                Text("\(dayLabel(conversation.start)), \(conversation.start.formatted(date: .omitted, time: .shortened))\u{2013}\(conversation.end.formatted(date: .omitted, time: .shortened))")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                    .listRowBackground(Color.clear)
             }
             if let summary = conversation.summary, !summary.isEmpty {
                 Section("Summary") { Text(summary) }
             }
             if !conversation.threads.isEmpty {
-                Section("Topics") {
+                Section {
                     ThreadList(threads: conversation.threads) { model.askAbout($0, in: conversation.id) }
+                } header: {
+                    Text("Topics")
+                } footer: {
+                    Text("Tap a topic to ask where you were with it.")
                 }
             }
             if let hint = nameHints.first {
@@ -317,7 +336,11 @@ struct ConversationView: View {
                 }
             }
             Section {
-                ForEach(Array(conversation.transcript.split(separator: "\n").enumerated()), id: \.offset) { _, line in
+                // Each line's time in the phone's own format, as everywhere else ("2:03 PM", not "14:03").
+                let lines = conversation.transcript.split(separator: "\n")
+                let times = TranscriptFormat.times(of: lines, from: conversation.start)
+                ForEach(lines.indices, id: \.self) { i in
+                    let line = lines[i]
                     let parts = parse(String(line))
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 6) {
@@ -326,7 +349,9 @@ struct ConversationView: View {
                                     Text(who).font(.subheadline.weight(.semibold)).foregroundStyle(VoiceColor.of(who))
                                 }
                             }
-                            Text(parts.time).font(.caption).foregroundStyle(.secondary)
+                            if let at = times[i] {
+                                Text(at.formatted(date: .omitted, time: .shortened)).font(.caption).foregroundStyle(.secondary)
+                            }
                         }
                         Text(parts.text)
                     }
@@ -348,10 +373,35 @@ struct ConversationView: View {
                 Button("Delete Conversation", role: .destructive) { confirmDelete = true }
             }
         }
-        .navigationTitle(conversation.start.formatted(date: .abbreviated, time: .shortened))
+        .navigationTitle(displayTitle(conversation))
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar { ShareLink(item: shareText(conversation)) }
+        .toolbar {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                ShareLink(item: shareText(conversation))
+                Menu {
+                    Button("Ask About This", systemImage: "questionmark.bubble") {
+                        model.tab = 0
+                        model.ask(conversation.title.map { "What happened in \u{201C}\($0)\u{201D}?" } ?? "What was said then?", focus: conversation.id)
+                    }
+                    Button("Rename\u{2026}", systemImage: "pencil") { newTitle = conversation.title ?? ""; renaming = true }
+                } label: {
+                    Label("More", systemImage: "ellipsis")
+                }
+            }
+        }
         .sensoryFeedback(.success, trigger: saved)
+        .sensoryFeedback(.error, trigger: failure) { _, now in now != nil }
+        .alert("Couldn\u{2019}t Save", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(failure ?? "")
+        }
+        .alert("Rename", isPresented: $renaming) {
+            TextField("Title", text: $newTitle)
+            Button("Cancel", role: .cancel) {}
+            Button("Save") { renameConversation(conversation, to: newTitle) }
+                .disabled(newTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
         .alert(naming.map { Labels.number($0) != nil ? "Who\u{2019}s \($0)?" : "Rename \($0)" } ?? "",
                isPresented: Binding(get: { naming != nil }, set: { if !$0 { naming = nil } })) {
             TextField("Name", text: $typed).textInputAutocapitalization(.words)
@@ -372,7 +422,7 @@ struct ConversationView: View {
                             saved += 1
                             note = "Fixed. WTF will catch that next time."
                         } else {
-                            note = "That line changed while you were fixing it, so nothing was changed. Try again."
+                            failure = "That line changed while you were fixing it, so nothing was changed. Try again."
                         }
                     }
                 }
@@ -385,6 +435,8 @@ struct ConversationView: View {
                 dismiss()
                 Task { await model.deleteConversation(id) }
             }
+        } message: {
+            Text("Its transcript, recording and suggestions go too. This can\u{2019}t be undone.")
         }
     }
 
@@ -419,7 +471,7 @@ struct ConversationView: View {
                 return
             }
             guard let done = await model.pipeline.nameVoice(in: id, label: label, as: typed) else {
-                note = "That name can\u{2019}t be used: try a shorter one, without numbers."
+                failure = "That name can\u{2019}t be used: try a shorter one, without numbers."
                 return
             }
             saved += 1
@@ -430,14 +482,13 @@ struct ConversationView: View {
         }
     }
 
-    private func parse(_ line: String) -> (time: String, speaker: String?, text: String) {
-        guard line.hasPrefix("["), let close = line.firstIndex(of: "]") else { return ("", nil, line) }
-        let time = String(line[line.index(after: line.startIndex)..<close].prefix(5))
+    private func parse(_ line: String) -> (speaker: String?, text: String) {
+        guard line.hasPrefix("["), let close = line.firstIndex(of: "]") else { return (nil, line) }
         let rest = line[line.index(after: close)...].trimmingCharacters(in: .whitespaces)
-        guard let colon = rest.range(of: ": ") else { return (time, nil, rest) }
+        guard let colon = rest.range(of: ": ") else { return (nil, rest) }
         let who = String(rest[..<colon.lowerBound])
         let text = String(rest[colon.upperBound...])
-        return (time, who == Labels.anonymous ? nil : who, text)
+        return (who == Labels.anonymous ? nil : who, text)
     }
 }
 
@@ -477,6 +528,15 @@ func displayTitle(_ c: Conversation) -> String {
     if let title = c.title { return title }
     if !c.closed { return "Listening\u{2026}" }
     return Brain.notReadyReason == nil ? "Summarising\u{2026}" : "Conversation"
+}
+
+/// Your own title for it. Its summary is left alone: one set here would mean it's never
+/// summarised, heard again or looked through for list items and facts.
+@MainActor func renameConversation(_ c: Conversation, to title: String) {
+    let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !t.isEmpty else { return }
+    c.title = t
+    try? c.modelContext?.save()
 }
 
 /// "Today · 13 Oct", "Yesterday · 12 Oct", "Saturday · 10 Oct".

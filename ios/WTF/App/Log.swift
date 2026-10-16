@@ -45,7 +45,10 @@ enum Log {
                 let size = handle.offsetInFile
                 try? handle.close()
                 if size > maxBytes, let data = try? Data(contentsOf: url) {
-                    try? data.suffix(maxBytes / 2).write(to: url)
+                    // From the start of a line, so no character's cut in half.
+                    var kept = data.suffix(maxBytes / 2)
+                    if let newline = kept.firstIndex(of: 10) { kept = kept[(newline + 1)...] }
+                    try? Data(kept).write(to: url)
                 }
             } else {
                 try? Data(line.utf8).write(to: url)
@@ -62,7 +65,9 @@ enum Log {
     /// The last [lines] lines.
     static func tail(_ lines: Int = 400) -> String {
         queue.sync {
-            guard let text = try? String(contentsOf: file, encoding: .utf8) else { return "(empty)" }
+            // Leniently: a log cut part-way through a character by an earlier version still reads.
+            guard let data = try? Data(contentsOf: file), !data.isEmpty else { return "(empty)" }
+            let text = String(decoding: data, as: UTF8.self)
             return text.split(separator: "\n", omittingEmptySubsequences: false).suffix(lines).joined(separator: "\n")
         }
     }

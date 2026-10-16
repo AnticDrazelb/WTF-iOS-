@@ -18,9 +18,11 @@ struct WTFApp: App {
                     Log.info("App started (build \(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"))")
                     if !ListeningActivity.drawable { Log.error("WTF's widget extension isn't installed: no pill, Lock Screen card or controls") }
                     Demo.prepare(model) // CI's Simulator screenshots only (-WTFDemo YES)
+                    // A card left from before WTF was closed would still say "Recording". Ended
+                    // before waiting on anything, and not during a start (opening the app, the
+                    // Action button): that start's card is already showing, and is needed.
+                    if !model.recording && !model.isStarting { ListeningActivity.shared.stop() }
                     await model.tidyUp()
-                    // A card left from before WTF was closed would still say "Recording".
-                    if !model.recording { ListeningActivity.shared.stop() }
                     model.resumeIfNeeded()
                     model.processNow()
                 }
@@ -85,7 +87,7 @@ struct RootView: View {
         }
         .sheet(isPresented: $model.stopSheet) {
             StopListeningSheet()
-                .presentationDetents([.medium])
+                .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
         }
     }
@@ -95,50 +97,58 @@ struct RootView: View {
 struct StopListeningSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
-        VStack(spacing: 18) {
-            Image(systemName: "waveform")
-                .font(.system(size: 40, weight: .medium))
-                .symbolEffect(.variableColor.iterative, options: .repeating)
-                .padding(.top, 28)
-            VStack(spacing: 4) {
-                Text("WTF is listening").font(.title2.bold())
-                if let since = model.listeningSince {
-                    Text("Since \(since.formatted(date: .omitted, time: .shortened))")
-                        .font(.subheadline).foregroundStyle(.secondary)
+        // Scrolls, and the waveform makes way, so the buttons aren't cut off at large text sizes.
+        ScrollView {
+            VStack(spacing: 18) {
+                if !typeSize.isAccessibilitySize {
+                    Image(systemName: "waveform")
+                        .font(.system(size: 40, weight: .medium))
+                        .symbolEffect(.variableColor.iterative, options: .repeating)
                 }
-            }
-            VStack(spacing: 10) {
-                Button {
-                    model.setListening(false)
-                    dismiss()
-                } label: {
-                    // Black on white (white on black in light mode): the app's tint is white, and
-                    // a filled button's own text would be white on white.
-                    Label("Stop Listening", systemImage: "stop.fill")
-                        .font(.headline)
-                        .foregroundStyle(Color(uiColor: .systemBackground))
-                        .frame(maxWidth: .infinity, minHeight: 50)
-                        .background(Capsule().fill(Color.primary))
-                }
-                .buttonStyle(.plain)
-                if model.hasHeard {
-                    Button("What Was I Saying?") {
-                        dismiss()
-                        model.askFromShortcut()
+                VStack(spacing: 4) {
+                    Text("WTF is listening").font(.title2.bold())
+                    if let since = model.listeningSince {
+                        Text("Since \(since.formatted(date: .omitted, time: .shortened))")
+                            .font(.subheadline).foregroundStyle(.secondary)
                     }
-                    .frame(maxWidth: .infinity)
                 }
-                Button("Keep Listening") { dismiss() }
-                    .foregroundStyle(.secondary)
+                VStack(spacing: 10) {
+                    Button {
+                        model.setListening(false)
+                        dismiss()
+                    } label: {
+                        // Black on white (white on black in light mode): the app's tint is white, and
+                        // a filled button's own text would be white on white.
+                        Label("Stop Listening", systemImage: "stop.fill")
+                            .font(.headline)
+                            .foregroundStyle(Color(uiColor: .systemBackground))
+                            .frame(maxWidth: .infinity, minHeight: 50)
+                            .background(Capsule().fill(Color.primary))
+                    }
+                    .buttonStyle(.plain)
+                    if model.hasHeard {
+                        Button("What Was I Saying?") {
+                            dismiss()
+                            model.askFromShortcut()
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    Button("Keep Listening") { dismiss() }
+                        .foregroundStyle(.secondary)
+                }
+                .buttonBorderShape(.capsule)
+                .padding(.horizontal, 24)
             }
-            .buttonBorderShape(.capsule)
-            .padding(.horizontal, 24)
-            Spacer(minLength: 0)
+            .padding(.top, 28).padding(.bottom, 20)
         }
         .tint(.primary)
         .sensoryFeedback(.impact, trigger: model.recording)
+        // Stopped some other way while it's open (the Lock Screen card, Siri, the microphone
+        // taken for good): it no longer stands.
+        .onChange(of: model.recording) { _, on in if !on { dismiss() } }
     }
 }
 
@@ -173,10 +183,13 @@ struct ListeningButton: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        Button { model.setListening(!model.recording) } label: {
+        // While a start's under way (the first can be a long download), a tap gives up on it.
+        Button { model.setListening(model.isStarting ? false : !model.recording) } label: {
             HStack(spacing: 6) {
                 if model.recording {
                     Image(systemName: "waveform").symbolEffect(.variableColor.iterative, options: .repeating)
+                } else if model.isStarting {
+                    ProgressView().controlSize(.small)
                 } else {
                     Image(systemName: "mic")
                 }
@@ -185,7 +198,7 @@ struct ListeningButton: View {
             .foregroundStyle(.primary)
             .padding(.horizontal, 4)
         }
-        .accessibilityHint(model.recording ? "Pauses listening" : "Starts listening")
+        .accessibilityHint(model.recording ? "Pauses listening" : model.isStarting ? "Cancels starting" : "Starts listening")
         .sensoryFeedback(.impact(weight: .medium), trigger: model.recording)
     }
 }
@@ -195,24 +208,33 @@ struct WelcomeSheet: View {
     let done: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            Text("Before WTF listens").font(.largeTitle.bold()).padding(.top, 36)
-            point("ear", "It listens for speech around you while it's on: yours and other people's. Silence and music aren't kept.")
-            point("iphone", "Everything's transcribed and summarised on this iPhone. Nothing is uploaded, and it isn't in your backups.")
-            point("clock.arrow.circlepath", "Conversations are deleted after the time you choose in Settings (a week to start with). Delete any of it, or all of it, whenever you like.")
-            point("person.2", "Let people know when WTF is listening, and follow the law where you are on recording others.")
-            Spacer()
-            Button(action: done) {
-                Text("Continue").font(.headline)
-                    .foregroundStyle(Color(uiColor: .systemBackground))
-                    .frame(maxWidth: .infinity, minHeight: 50)
-                    .background(Capsule().fill(Color.primary))
+        // The points scroll and Continue stays in reach, so at large text sizes none of it is cut off.
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                Text("Before WTF listens").font(.largeTitle.bold()).padding(.top, 36)
+                point("ear", "It listens for speech around you while it's on: yours and other people's. Silence and music aren't kept.")
+                point("iphone", "Everything's transcribed and summarised on this iPhone. Nothing is uploaded, and it isn't in your backups.")
+                point("clock.arrow.circlepath", "Conversations are deleted after the time you choose in Settings (a week to start with). Delete any of it, or all of it, whenever you like.")
+                point("person.2", "Let people know when WTF is listening, and follow the law where you are on recording others.")
             }
-            .buttonStyle(.plain)
-            Link("Privacy Policy", destination: URL(string: "https://github.com/justmeclaude-ops/WTF-iphone/blob/main/PRIVACY.md")!)
-                .font(.footnote).foregroundStyle(.secondary).frame(maxWidth: .infinity)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 28).padding(.bottom, 20)
         }
-        .padding(.horizontal, 28).padding(.bottom, 20)
+        .safeAreaInset(edge: .bottom) {
+            VStack(spacing: 12) {
+                Button(action: done) {
+                    Text("Continue").font(.headline)
+                        .foregroundStyle(Color(uiColor: .systemBackground))
+                        .frame(maxWidth: .infinity, minHeight: 50)
+                        .background(Capsule().fill(Color.primary))
+                }
+                .buttonStyle(.plain)
+                Link("Privacy Policy", destination: URL(string: "https://github.com/justmeclaude-ops/WTF-iphone/blob/main/PRIVACY.md")!)
+                    .font(.footnote).foregroundStyle(.secondary).frame(maxWidth: .infinity)
+            }
+            .padding(.horizontal, 28).padding(.top, 12).padding(.bottom, 20)
+            .background(.background)
+        }
     }
 
     private func point(_ icon: String, _ text: String) -> some View {

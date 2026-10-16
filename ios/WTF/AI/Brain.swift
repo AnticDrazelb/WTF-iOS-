@@ -117,16 +117,22 @@ enum Brain {
             + "\n\nReply with a first line \"Title: \" and a title of 2 to 6 words, then 2 to 5 short points, each on its own line starting with \"- \"."
         let text = try await session.respond(to: prompt, options: steady).content
         var title: String?
+        var firstLine: String?
         var points: [String] = []
         for raw in text.split(separator: "\n") {
-            let line = raw.trimmingCharacters(in: .whitespaces)
-            if title == nil, line.lowercased().hasPrefix("title:") {
+            // The model sometimes writes "**Title:** …", "## Title: …" or numbered points.
+            let line = raw.replacingOccurrences(of: "**", with: "")
+                .trimmingCharacters(in: CharacterSet(charactersIn: "# ").union(.whitespaces))
+            if let bullet = line.range(of: #"^(?:[-\#u{2022}*]|\d+[.)])\s+"#, options: .regularExpression) {
+                points.append(String(line[bullet.upperBound...]).trimmingCharacters(in: .whitespaces))
+            } else if title == nil, line.lowercased().hasPrefix("title:") {
                 title = Threads.clean(String(line.dropFirst(6)))
-            } else if line.hasPrefix("- ") || line.hasPrefix("\u{2022} ") || line.hasPrefix("* ") {
-                points.append(String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces))
+            } else if firstLine == nil, !line.isEmpty, !line.hasSuffix(":") {
+                firstLine = line
             }
         }
-        guard let title else { return nil }
+        // No "Title:" line: its first plain line will do.
+        guard let title = title ?? firstLine.flatMap(Threads.clean) else { return nil }
         return (title, points.filter { !$0.isEmpty })
     }
 
@@ -166,7 +172,7 @@ enum Brain {
     static func day(_ prompt: String) async throws -> String {
         let session = LanguageModelSession(model: model, instructions: "You look back over someone's day for them, from notes on their conversations, in a few plain sentences. Start with the recap itself, and use only what's in the notes.")
         let response = try await session.respond(to: prompt, options: steady)
-        return Prompts.tidy(response.content)
+        return plain(Prompts.tidy(response.content))
     }
 
     /// A short answer to read aloud, given up on after [seconds].
@@ -175,9 +181,17 @@ enum Brain {
             let session = LanguageModelSession(model: model, instructions: Prompts.instructions)
             return await Log.attempt("Spoken answer") {
                 let response = try await session.respond(to: prompt, options: steady)
-                return Prompts.tidy(response.content)
+                return plain(Prompts.tidy(response.content))
             }
         }
+    }
+
+    /// Without the markdown the model sometimes writes: Ask shows text as it is, and read aloud
+    /// the asterisks would be said. Bold marks go and "* " or "- " points become "• ".
+    static func plain(_ text: String) -> String {
+        text.replacingOccurrences(of: #"\*\*|__"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"(?m)^[ \t]*#{1,6}[ \t]+"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"(?m)^[ \t]*[*-][ \t]+"#, with: "\u{2022} ", options: .regularExpression)
     }
 
     /// The prompt didn't fit in the model's context (its 4,096 tokens): worth trying again with less.
@@ -194,7 +208,7 @@ enum Brain {
                 do {
                     let session = LanguageModelSession(model: model, instructions: Prompts.instructions)
                     for try await partial in session.streamResponse(to: prompt, options: steady) {
-                        continuation.yield(partial.content)
+                        continuation.yield(plain(partial.content))
                     }
                     continuation.finish()
                 } catch {

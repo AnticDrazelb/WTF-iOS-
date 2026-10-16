@@ -12,10 +12,12 @@ actor Pipeline {
     private var gapMinutes: Int { max(1, UserDefaults.standard.integer(forKey: "gapMinutes").nonZero ?? 5) }
     private var keepDays: Int { UserDefaults.standard.integer(forKey: "keepDays").nonZero ?? 7 }
 
-    /// Work runs in two queues, each one job at a time and in order: transcribing (what a question
-    /// waits for) and the slower AI work after it (threads, summaries), so a question never waits
-    /// behind a summary, and nothing is done twice.
+    /// Work runs in three queues, each one job at a time and in order: transcribing (what a question
+    /// waits for), the topic trail of what's just been said, and the slower AI work after it
+    /// (summaries), so a question never waits behind a summary, the trail never waits behind a
+    /// long conversation being heard again, and nothing is done twice.
     private var transcribing: Task<Bool, Never>?
+    private var following: Task<Void, Never>?
     private var thinking: Task<Void, Never>?
     /// New lines whose topic hasn't been worked out yet (it waits until after any question's answered).
     /// Each with the words the recogniser doubted and the ones it was sure of, for fixing misheard words.
@@ -27,8 +29,12 @@ actor Pipeline {
     /// The conversation going on was deleted: what's still being recorded or waiting to be
     /// transcribed would have joined it, so it goes too, rather than coming back as a new one.
     func cutOff() {
+        // The transcribing going on holds chunks fetched before these deletes: it stops (see wiped).
+        wiped += 1
         wipedAt = Date()
         toFollow = []
+        // Nor are its words kept to answer from (the Action button reads the last few seconds).
+        LiveTranscriber.shared.forget()
         for chunk in (try? modelContext.fetch(FetchDescriptor<Chunk>(predicate: #Predicate { $0.status == "pending" }))) ?? [] {
             if let path = chunk.path { try? FileManager.default.removeItem(atPath: path) }
             modelContext.delete(chunk)
@@ -36,7 +42,7 @@ actor Pipeline {
         try? modelContext.save()
     }
 
-    /// Bumped by Delete Everything: work that was waiting on something checks it hasn't happened meanwhile.
+    /// Bumped by Delete Everything and cutOff: work that was waiting on something checks it hasn't happened meanwhile.
     private var wiped = 0
     /// When everything was last deleted: a recording that started before then, finished after, goes too.
     private var wipedAt = Date.distantPast
@@ -77,6 +83,7 @@ actor Pipeline {
         for (i, chunk) in pending.enumerated() {
             await MainActor.run { AppModel.shared.transcribing = (i, pending.count) }
             guard wiped == generation else { return false }
+            if gone(chunk) { continue }
             guard let path = chunk.path, FileManager.default.fileExists(atPath: path) else {
                 chunk.status = "failed"
                 continue
@@ -144,6 +151,8 @@ actor Pipeline {
                     toFollow.append((cid, text, chunk.start, chunk.end, Doubts.of(words), Doubts.protected(words)))
                     await suggest(for: c, found: ruleActions(c))
                     guard wiped == generation else { return false }
+                    // Deleted in the app meanwhile, with its chunks: gone() can't see that from here.
+                    guard conversation(cid) != nil else { continue }
                 }
                 if !keepAudio {
                     chunk.path = nil
@@ -166,22 +175,24 @@ actor Pipeline {
         return ok
     }
 
-    /// Catch up, then summarise conversations that have gone quiet, then tidy away old ones.
+    /// Catch up and follow the topic, then (in the background, without waiting) summarise
+    /// conversations that have gone quiet and tidy away old ones.
     func run() async {
         await refreshVocabulary()
         await catchUp()
+        let trail = following
+        let follow = Task { await trail?.value; await self.followThreads() }
+        following = follow
+        // A summary waits for its conversation's last lines to be followed, so it has them.
         let before = thinking
-        let job = Task { await before?.value; await self.think() }
-        thinking = job
-        await job.value
+        thinking = Task { await before?.value; await follow.value; await self.think() }
+        await follow.value
     }
 
-    /// The slow part: the thread map, summaries of finished conversations, and tidying up.
+    /// The slow part: summaries of finished conversations, and tidying up.
     private func think() async {
         let generation = wiped
         sweepAudio()
-        await followThreads()
-        guard wiped == generation else { return }
         let quietBefore = Date().addingTimeInterval(-Double(gapMinutes) * 60)
         let waiting = ((try? modelContext.fetch(FetchDescriptor<Conversation>(
             predicate: #Predicate { $0.summary == nil }))) ?? []).filter { $0.closed || $0.end < quietBefore }.map(\.id)
@@ -198,13 +209,15 @@ actor Pipeline {
             await extract(id)
         }
         guard wiped == generation else { return }
-        // Old recordings' records go here; old conversations go in the app (AppModel.expireOld),
-        // where the screens' copies are, so none is left pointing at one that's gone.
+        // Old recordings' records go here: once their audio's gone a day after, or at the latest
+        // with their conversations. Not ones waiting (the Timeline shows those). Old conversations
+        // and list items go in the app (AppModel.expireOld), where the screens' copies are, so
+        // none is left pointing at one that's gone.
         let cutoff = Date().addingTimeInterval(-Double(keepDays) * 86_400)
-        try? modelContext.delete(model: Chunk.self, where: #Predicate { $0.end < cutoff })
-        // Ticked-off and turned-down list items are kept a while (so they aren't suggested again
-        // from the same talk), then go with the conversations they came from.
-        try? modelContext.delete(model: ActionItem.self, where: #Predicate { ($0.status == "done" || $0.status == "dismissed") && $0.created < cutoff })
+        let dayAgo = Date().addingTimeInterval(-86_400)
+        try? modelContext.delete(model: Chunk.self, where: #Predicate {
+            $0.status != "pending" && ($0.end < cutoff || ($0.path == nil && $0.end < dayAgo))
+        })
         try? modelContext.save()
     }
 
@@ -297,8 +310,10 @@ actor Pipeline {
     /// matches it (by meaning as well as words), the parts of it that matter most, and what's
     /// known that bears on it.
     func notes(for question: String, focus: UUID?) -> (notes: [(label: String, title: String?, summary: String?)], best: (label: String, transcript: String)?, background: String, used: [UUID]) {
-        let all = (try? modelContext.fetch(FetchDescriptor<Conversation>(sortBy: [SortDescriptor(\.start, order: .reverse)]))) ?? []
-        let pool = focus.map { id in all.filter { $0.id == id } } ?? Array(all.prefix(40))
+        // Only the ones it could use: whole transcripts are large, and there can be months of them.
+        var d = FetchDescriptor<Conversation>(sortBy: [SortDescriptor(\.start, order: .reverse)])
+        if let id = focus { d.predicate = #Predicate<Conversation> { $0.id == id } } else { d.fetchLimit = 40 }
+        let pool = (try? modelContext.fetch(d)) ?? []
         let keys = Prompts.keywords(question)
         let asked = Meaning.vector(question)
         func rank(_ c: Conversation) -> Double {
@@ -387,6 +402,7 @@ actor Pipeline {
         wiped += 1
         wipedAt = Date()
         toFollow = []
+        LiveTranscriber.shared.forget()
         unremembered = [:]
         try? modelContext.delete(model: Fact.self)
         Learned.forget()
@@ -509,7 +525,8 @@ actor Pipeline {
             }
         }
         let split = await heardVoices
-        guard let words, !words.isEmpty, split != nil || !voicesOn else {
+        // Without the voices, Better Accuracy's words are still worth having (see keptVoices).
+        guard let words, !words.isEmpty, split != nil || !voicesOn || better else {
             Log.info("Hearing the conversation again didn't finish, so it's kept as it was")
             return
         }
@@ -520,8 +537,14 @@ actor Pipeline {
         // Without the voice models, every line's just "Speech", as it was.
         var heard: [Voiceprint] = []
         let labels = split.map { VoiceMatcher.label($0.voices, heard: &heard, known: knownVoices()) } ?? [:]
-        let turns = split?.turns.compactMap { t in labels[t.speaker].map { SpeakerAlign.Turn(start: t.start, end: t.end, speaker: $0) } } ?? []
-        let fallback = split == nil ? Labels.anonymous : turns.first?.speaker ?? Labels.numbered(1)
+        var turns = split?.turns.compactMap { t in labels[t.speaker].map { SpeakerAlign.Turn(start: t.start, end: t.end, speaker: $0) } } ?? []
+        // A name given to a voice as it went (you named it, or it was matched then) that this
+        // hearing doesn't find, or no voices heard this time: the voices stay as they were.
+        let named = Set(Labels.speakers(in: before)).filter { $0 != Labels.anonymous && Labels.number($0) == nil }
+        let keptVoices = (voicesOn && split == nil) || !named.isSubset(of: Set(labels.values))
+        if keptVoices { turns = Self.turns(of: before, from: now.start, in: joined) }
+        let fallback = keptVoices ? turns.first?.speaker ?? Labels.anonymous
+            : split == nil ? Labels.anonymous : turns.first?.speaker ?? Labels.numbered(1)
         let said = SpeakerAlign.assign(words, turns: turns, fallback: fallback)
         let utterances = said.compactMap { s -> Utterance? in
             let text = TranscriptFormat.clean(s.text)
@@ -534,9 +557,9 @@ actor Pipeline {
         }
         let voicesBefore = Set(Labels.speakers(in: before)).count
         now.transcript = transcript
-        if split != nil { now.voiceprints = heard }
+        if split != nil && !keptVoices { now.voiceprints = heard }
         try? modelContext.save()
-        Log.info("Heard a \(Int(joined.length / 60)) min conversation again as a whole\(better ? " (Better Accuracy)" : ""): \(Set(labels.values).count) voices (was \(voicesBefore)), \(String(format: "%.0f", Date().timeIntervalSince(started))) s")
+        Log.info("Heard a \(Int(joined.length / 60)) min conversation again as a whole\(better ? " (Better Accuracy)" : ""): \(keptVoices ? "voices kept as they were, " : "")\(Set(turns.map(\.speaker)).count) voices (was \(voicesBefore)), \(String(format: "%.0f", Date().timeIntervalSince(started))) s")
         // Misheard words fixed again: the stretches with words the recogniser doubted.
         guard Brain.notReadyReason == nil else { return }
         let doubts = Doubts.of(words, limit: 60), protected = Doubts.protected(words)
@@ -548,6 +571,23 @@ actor Pipeline {
             guard !groupWords.isDisjoint(with: doubted) else { continue }
             let mentioned = doubts.filter { groupWords.contains($0.word) }
             _ = await correctMisheard(group, in: id, doubts: mentioned, protected: protected)
+        }
+    }
+
+    /// The voices as they were heard as it went: a turn for each line of [transcript], until the
+    /// next line, in seconds into the joined audio.
+    private static func turns(of transcript: String, from start: Date, in joined: JoinedAudio) -> [SpeakerAlign.Turn] {
+        let lines = transcript.split(separator: "\n")
+        let times = TranscriptFormat.times(of: lines, from: start)
+        var timed: [(at: Double, speaker: String)] = []
+        for (i, line) in lines.enumerated() {
+            guard let t = times[i], let g = TranscriptFormat.turn.whole(String(line)) else { continue }
+            // Line times are to the second: a line just after a recording began counts as in it.
+            guard let piece = joined.pieces.last(where: { $0.recorded <= t.addingTimeInterval(1) }) ?? joined.pieces.first else { continue }
+            timed.append((piece.at + min(max(0, t.timeIntervalSince(piece.recorded)), piece.length), g[1]))
+        }
+        return timed.enumerated().map { i, line in
+            SpeakerAlign.Turn(start: line.at, end: i + 1 < timed.count ? timed[i + 1].at : joined.length, speaker: line.speaker)
         }
     }
 
@@ -665,12 +705,6 @@ actor Pipeline {
         guard let p = ((try? modelContext.fetch(FetchDescriptor<Person>())) ?? []).first(where: { !$0.isMe && $0.name == old }) else { return false }
         renamePerson(p.id, to: typed)
         return true
-    }
-
-    /// Stops recognising someone. Transcripts keep the name they were given.
-    func forgetPerson(_ id: UUID) {
-        try? modelContext.delete(model: Person.self, where: #Predicate { $0.id == id })
-        try? modelContext.save()
     }
 
     private func relabel(_ c: Conversation, from: String, to: String) {
@@ -825,9 +859,12 @@ actor Pipeline {
     private func refreshVocabulary() async {
         let people = ((try? modelContext.fetch(FetchDescriptor<Person>())) ?? []).filter { !$0.isMe }.map(\.name)
         let items = ((try? modelContext.fetch(FetchDescriptor<ActionItem>(predicate: #Predicate { $0.status == "accepted" || $0.status == "suggested" }))) ?? []).map(\.title)
-        let facts = ((try? modelContext.fetch(FetchDescriptor<Fact>())) ?? []).map(\.text)
+        var recentFacts = FetchDescriptor<Fact>(sortBy: [SortDescriptor(\.created, order: .reverse)])
+        recentFacts.fetchLimit = 40
+        let facts = ((try? modelContext.fetch(recentFacts)) ?? []).map(\.text)
         let personal = await PersonalWords.words()
-        let extra = Learned.fixes.map(\.meant) + KnownFacts.names(in: facts) + personal
+        // Each kind has its share, so the list and the shops still fit however much is learnt.
+        let extra: [String] = Learned.fixes.prefix(20).map(\.meant) + Array(KnownFacts.names(in: facts).prefix(15)) + Array(personal.prefix(35))
         let words = Vocabulary.words(people: people, items: items, extra: extra, limit: 120)
         guard await SpeechEngine.shared.expectedWords() != words else { return }
         await SpeechEngine.shared.setVocabulary(words)
@@ -875,7 +912,10 @@ actor Pipeline {
             if summaryFailures[id]! >= 3, let c = conversation(id) {
                 c.title = "Conversation"
                 c.summary = ""
+                // Its facts and list items are still looked for: they're asked for separately.
+                c.extracted = false
                 try? modelContext.save()
+                await extract(id)
             }
             return
         }
@@ -920,9 +960,18 @@ actor Pipeline {
         let cid: UUID? = c.id
         let open = (try? modelContext.fetch(FetchDescriptor<ActionItem>(predicate: #Predicate { $0.status == "suggested" || $0.status == "accepted" }))) ?? []
         let mine = (try? modelContext.fetch(FetchDescriptor<ActionItem>(predicate: #Predicate { $0.conversationID == cid }))) ?? []
-        let known = open + mine
+        func matches(_ item: ActionItem, _ a: ExtractedAction) -> Bool {
+            item.type == a.type.rawValue && (item.title.lowercased() == a.title.lowercased() || ActionRules.similar(item.title, a.title))
+        }
+        // Another conversation's appointment is the same one only if it's on the same day: there's
+        // a dentist or a meeting again next month.
+        func sameDay(_ item: ActionItem, _ a: ExtractedAction) -> Bool {
+            guard a.type == .event else { return true }
+            guard let was = item.start, let now = a.resolved?.start() else { return item.start == nil && a.resolved?.start() == nil }
+            return Calendar.current.isDate(was, inSameDayAs: now)
+        }
         var fresh: [ExtractedAction] = []
-        for a in found where !known.contains(where: { $0.type == a.type.rawValue && ($0.title.lowercased() == a.title.lowercased() || ActionRules.similar($0.title, a.title)) })
+        for a in found where !mine.contains(where: { matches($0, a) }) && !open.contains(where: { matches($0, a) && sameDay($0, a) })
             && !fresh.contains(where: { $0.type == a.type && $0.title.lowercased() == a.title.lowercased() }) {
             fresh.append(a)
         }

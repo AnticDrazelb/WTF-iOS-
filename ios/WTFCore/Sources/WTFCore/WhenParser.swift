@@ -72,6 +72,9 @@ public enum WhenParser {
         var q = phrase.lowercased()
         q = Rx(#"(\d)(st|nd|rd|th)\b"#).replace(q, with: "$1")
         q = q.replacingOccurrences(of: "a.m.", with: "am").replacingOccurrences(of: "p.m.", with: "pm").replacingOccurrences(of: "o'clock", with: "")
+        // "7.30" is how a time's often written here: keep it a time before full stops go (not
+        // "£3.50", "45.30" or the date "15.10.26").
+        q = Rx(#"(?<![£$€\d.])\b([01]?\d|2[0-3])\.([0-5]\d)(?!\.?\d)"#).replace(q, with: "$1:$2")
         q = " " + Rx(#"[,.!?]"#).replace(q, with: " ") + " "
         let today = Day(y: reference.year!, m: reference.month!, d: reference.day!)
         guard var date = parseDate(q, today: today) else { return nil }
@@ -166,8 +169,9 @@ public enum WhenParser {
     }
 
     private static func nextDate(_ today: Day, month: Int, day: Int) -> Day? {
-        for year in today.y...(today.y + 1) {
-            guard (1...Day.daysIn(year, month)).contains(day) else { return nil }
+        for year in today.y...(today.y + 4) {
+            // "29 February" waits for a leap year rather than giving up.
+            guard (1...Day.daysIn(year, month)).contains(day) else { continue }
             let d = Day(y: year, m: month, d: day)
             if !(d < today) { return d }
         }
@@ -187,14 +191,15 @@ public enum WhenParser {
             return h
         }
         if Rx(#"\b(noon|midday|lunchtime)\b"#).test(q) { return (12, 0) }
-        if Rx(#"\bmidnight\b"#).test(q) { return (0, 0) }
+        // "Friday at midnight" means the end of Friday, not the start of it (Thursday night).
+        if Rx(#"\bmidnight\b"#).test(q) { return (23, 59) }
         if let m = Rx(#"\b(\d{1,2})[:.](\d{2})\s*(am|pm)?\b"#).first(q) {
             return (adjust(Int(m[1])!) % 24, min(max(Int(m[2])!, 0), 59))
         }
         if let m = Rx(#"\bhalf (past )?"# + num + #"\b"#).first(q) { return (adjust(n(m[2])) % 24, 30) }
         if let m = Rx(#"\bquarter past "# + num + #"\b"#).first(q) { return (adjust(n(m[1])) % 24, 15) }
         if let m = Rx(#"\bquarter to "# + num + #"\b"#).first(q) { return ((adjust(n(m[1])) + 23) % 24, 45) }
-        if let m = Rx(#"\b"# + num + #"\s*(am|pm)\b"#).first(q) { return (adjust(n(m[1])) % 24, 0) }
+        if let m = Rx(#"\b"# + num + #"\s*(am|pm)\b"#).first(q), (1...12).contains(n(m[1])) { return (adjust(n(m[1])) % 24, 0) }
         if let m = Rx(#"\b(?:at|for|from|by)\s+"# + num + #"\b(?!\s*(?:st|nd|rd|th|minutes|mins|people|of))"#).first(q) {
             let h = n(m[1])
             if (1...12).contains(h) { return (adjust(h) % 24, 0) }

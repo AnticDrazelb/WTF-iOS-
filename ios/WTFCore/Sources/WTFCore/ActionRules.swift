@@ -210,8 +210,11 @@ public enum ActionRules {
     /// to go on, every line counts.
     public static func ruleActions(_ lines: [String], conversationStart: Date, title: String?, calendar: Calendar = .current, youOnly: Bool = true) -> [ExtractedAction] {
         var out: [ExtractedAction] = []
+        // Each line's own day: "tomorrow" said after midnight is the day after the conversation began.
+        let heard = TranscriptFormat.times(of: lines.map { Substring($0) }, from: conversationStart, calendar: calendar)
         for (index, line) in lines.enumerated() {
             let t = text(line)
+            let reference = heard[index] ?? conversationStart
             let next = index + 1 < lines.count ? text(lines[index + 1]) : ""
             // Clause by clause, so "go to the pub and then get some milk" still finds the milk.
             for clause in clauses.split(t) where !eatingOut.test(clause) && !collecting.test(clause) {
@@ -255,10 +258,10 @@ public enum ActionRules {
                 if noun != nil, i + 1 < sentences.count, !eventNoun.test(sentences[i + 1]) { candidates.append(sentences[i + 1]) }
                 candidates.append(sentence)
                 guard let (said, resolved) = candidates.lazy.compactMap({ c in
-                    WhenParser.parse(c, reference: conversationStart, calendar: calendar).map { (c, $0) }
+                    WhenParser.parse(c, reference: reference, calendar: calendar).map { (c, $0) }
                 }).first else { continue }
                 // "He turned five today": happening already, not one for the calendar.
-                if happeningToday(resolved, conversationStart: conversationStart, calendar: calendar) { continue }
+                if happeningToday(resolved, conversationStart: reference, calendar: calendar) { continue }
                 let dateSentence = sentences.first { $0.contains(said) || said.contains($0) } ?? sentence
                 let note = planNote(resolved, said: dateSentence, around: sentences[i...].joined(separator: " ") + " " + next, thing: sentence)
                 if let noun {
@@ -281,6 +284,11 @@ public enum ActionRules {
         // With the lines it read, everything it found is checked against them: small models
         // add things of their own ("Confirm McDonald's details"), and "pick up Ezra" isn't shopping.
         let checking = !lines.isEmpty
+        // When each line was said, so a day is worked out from the day it was said on.
+        let heard = TranscriptFormat.times(of: lines.map { Substring($0) }, from: conversationStart, calendar: calendar)
+        func reference(_ line: String?) -> Date {
+            line.flatMap { lines.firstIndex(of: $0) }.flatMap { heard[$0] } ?? conversationStart
+        }
         func buyable(_ it: String) -> Bool {
             !checking || (grounded(it, in: lines) && !isCollecting(it, in: lines))
         }
@@ -296,21 +304,22 @@ public enum ActionRules {
         }
         for e in events where !e.what.isEmpty && !bogusEventTitle.test(e.what.lowercased()) {
             // Only real plans: a day or a time actually said ("Thursday at 3"), not "later" or "nothing".
-            guard let whenText = e.when.flatMap({ $0.isEmpty ? nil : $0 }), !vagueWhen.test(whenText.lowercased()),
-                  let resolved = WhenParser.parse(whenText, reference: conversationStart, calendar: calendar) else { continue }
+            guard let whenText = e.when.flatMap({ $0.isEmpty ? nil : $0 }), !vagueWhen.test(whenText.lowercased()) else { continue }
+            let source = sourceLine(e.what + " " + whenText, in: lines)
+            let saidAt = reference(source)
+            guard let resolved = WhenParser.parse(whenText, reference: saidAt, calendar: calendar) else { continue }
             // Today with no time: it's happening, not something to put in the calendar.
-            if happeningToday(resolved, conversationStart: conversationStart, calendar: calendar) { continue }
+            if happeningToday(resolved, conversationStart: saidAt, calendar: calendar) { continue }
             // The day (or time) has to have been said about it, not assumed: in the line that
             // mentions it, or the one after.
             if checking {
                 let near = lines.indices.filter { overlap(e.what, said(lines[$0])) > 0 }.flatMap { [$0, $0 + 1] }.filter { $0 < lines.count }
                 let sameDay = near.contains { i in
-                    guard let r = WhenParser.parse(said(lines[i]), reference: conversationStart, calendar: calendar) else { return false }
+                    guard let r = WhenParser.parse(said(lines[i]), reference: heard[i] ?? conversationStart, calendar: calendar) else { return false }
                     return r.year == resolved.year && r.month == resolved.month && r.day == resolved.day
                 }
                 guard sameDay else { continue }
             }
-            let source = sourceLine(e.what + " " + whenText, in: lines)
             var note = resolved.doubt
             let thing = e.what + " " + (source.map(said) ?? "")
             if note == nil, let source {
@@ -362,7 +371,9 @@ public enum ActionRules {
                 if r.type == .buy, k.type != .buy, k.source != nil, k.source == r.source, overlap(k.title, r.title) > 0 { return true }
                 if k.type == .event && r.type == .event {
                     let sameDay = k.resolved.map { [$0.year, $0.month, $0.day] } == r.resolved.map { [$0.year, $0.month, $0.day] } && k.resolved != nil
-                    return sameDay || similar(k.title, r.title)
+                    // The same day alone isn't enough: "Dentist" and "Party" tomorrow are two plans.
+                    let sameTime = k.resolved?.hour != nil && k.resolved?.hour == r.resolved?.hour && k.resolved?.minute == r.resolved?.minute
+                    return similar(k.title, r.title) || (sameDay && (overlap(k.title, r.title) > 0 || sameTime))
                 }
                 return (k.type == r.type && similar(k.title, r.title)) || (r.type == .buy && k.type == .todo && similar(k.title, r.title))
             }

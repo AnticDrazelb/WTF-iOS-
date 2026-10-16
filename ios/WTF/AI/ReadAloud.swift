@@ -11,17 +11,47 @@ import AVFoundation
 final class ReadAloud: NSObject {
     static let shared = ReadAloud()
 
-    private var synthesizer = AVSpeechSynthesizer()
+    private var synthesizer = AVSpeechSynthesizer() { didSet { synthesizer.delegate = self } }
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private var connected: AVAudioFormat?
     /// Each reading has a number, so a newer one takes over from an older one.
     private var reading = 0
     private var prepared: (key: String, sound: [AVAudioPCMBuffer])?
+    /// The session was set up for the reading going now, so it's let go when that stops.
+    private var ownsSession = false
+    /// What iOS's speech service is saying as a last resort: when it's done, WTF can hear again.
+    private var handedOver: ObjectIdentifier?
 
     override private init() {
         super.init()
+        synthesizer.delegate = self
         engine.attach(player)
+        // Headphones taken out mid-answer: it stops rather than carrying on out of the speaker,
+        // as Apple asks (and what it's saying may be private).
+        NotificationCenter.default.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { note in
+            guard let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+                  AVAudioSession.RouteChangeReason(rawValue: raw) == .oldDeviceUnavailable else { return }
+            Task { @MainActor in ReadAloud.shared.headphonesGone() }
+        }
+    }
+
+    private func headphonesGone() {
+        guard player.isPlaying || synthesizer.isSpeaking else { return }
+        Log.info("Headphones gone: stopped reading the answer aloud")
+        reading += 1
+        player.stop()
+        engine.stop()
+        synthesizer.stopSpeaking(at: .immediate)
+        finished()
+    }
+
+    /// The reading's over: WTF can hear again, and the session goes if it was set up for it.
+    private func finished() {
+        handedOver = nil
+        Recorder.shared.speaking = false
+        if ownsSession { releaseSession() }
+        ownsSession = false
     }
 
     /// Headphones of any kind are the way sound is going out now.
@@ -106,7 +136,11 @@ final class ReadAloud: NSObject {
     private func start(_ text: String, voice: AVSpeechSynthesisVoice?, speed: Double, ownSession: Bool) async {
         reading += 1
         let mine = reading
+        // An older reading's session may still be held, and this one may yet be overtaken itself:
+        // whichever finishes last lets it go.
+        ownsSession = ownsSession || ownSession
         player.stop()
+        handedOver = nil
         synthesizer.stopSpeaking(at: .immediate)
         let key = Self.key(text, voice, speed)
         // Made into sound here (or already, if it's the answer kept ready), then played here; a
@@ -128,16 +162,18 @@ final class ReadAloud: NSObject {
             Task {
                 await heard()
                 guard mine == self.reading else { return }
-                Recorder.shared.speaking = false
                 self.player.stop()
                 self.engine.stop()
-                if ownSession { self.releaseSession() }
+                self.finished()
             }
             return
         }
-        // Last resort: let iOS's speech service say it.
+        // Last resort: let iOS's speech service say it (not recorded either, until it's done).
         Log.error("Couldn't play the speech; handing it to iOS to say into \(Self.route)")
-        synthesizer.speak(utterance(text, voice: voice, speed: speed))
+        let spoken = utterance(text, voice: voice, speed: speed)
+        handedOver = ObjectIdentifier(spoken)
+        Recorder.shared.speaking = true
+        synthesizer.speak(spoken)
     }
 
     /// The speech as sound, or nothing if the synthesiser didn't produce any within 6 s.
@@ -264,5 +300,23 @@ final class ReadAloud: NSObject {
         AVSpeechSynthesisVoice.speechVoices()
             .filter { $0.language.hasPrefix("en") && !$0.voiceTraits.contains(.isNoveltyVoice) }
             .sorted { ($0.quality.rawValue, $1.name) > ($1.quality.rawValue, $0.name) }
+    }
+}
+
+extension ReadAloud: AVSpeechSynthesizerDelegate {
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        let id = ObjectIdentifier(utterance)
+        Task { @MainActor in ReadAloud.shared.spoken(id) }
+    }
+
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        let id = ObjectIdentifier(utterance)
+        Task { @MainActor in ReadAloud.shared.spoken(id) }
+    }
+
+    /// Only the last resort's own utterance counts: the sound made with write() reports too.
+    private func spoken(_ id: ObjectIdentifier) {
+        guard handedOver == id else { return }
+        finished()
     }
 }

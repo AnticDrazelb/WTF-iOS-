@@ -42,12 +42,18 @@ public enum TranscriptFormat {
     public static func times(of lines: [Substring], from start: Date, calendar: Calendar = .current) -> [Date?] {
         var day = calendar.startOfDay(for: start)
         var last = start
+        // Lines carry wall-clock times, so set them as such: on the day the clocks change,
+        // adding seconds to midnight would put every later line an hour out.
+        func on(_ day: Date, _ second: Int) -> Date {
+            calendar.date(bySettingHour: second / 3600, minute: second % 3600 / 60, second: second % 60, of: day)
+                ?? day.addingTimeInterval(Double(second))
+        }
         return lines.map { line in
             guard let second = secondOfDay(line) else { return nil }
-            var t = day.addingTimeInterval(Double(second))
+            var t = on(day, second)
             if t < last.addingTimeInterval(-12 * 3600) {
                 day = calendar.date(byAdding: .day, value: 1, to: day) ?? day.addingTimeInterval(86_400)
-                t = day.addingTimeInterval(Double(second))
+                t = on(day, second)
             }
             last = t
             return t
@@ -111,25 +117,33 @@ public enum ListAnswers {
         }
     }
 
-    static let shopping = Rx(#"\b(buy|shopping|groceries|shops|supermarket|pick up|get from the shop)\b"#)
+    /// Not "pick up" or "the shops" alone: "When do I pick up Ezra?", "What time do the shops shut?"
+    static let shopping = Rx(#"\b(buy|shopping|groceries|supermarket|(pick up|get) (from|at) the (shop|shops|supermarket)|need from the shops?)\b"#)
     static let events = Rx(#"\b(appointments?|calendar|meetings?|what'?s on|plans|schedule|diary|booked)\b"#)
     static let todos = Rx(#"\b(to-?dos?|tasks|need to do|have to do|promised|promise)\b"#)
 
-    public static func answer(_ question: String, open: [Item], now: Date = Date()) -> String? {
+    /// [calendar]: its time zone and locale, so times read as the person's own (12- or 24-hour).
+    public static func answer(_ question: String, open: [Item], now: Date = Date(), calendar: Calendar = .current) -> String? {
         let q = question.lowercased()
         // Only clear list questions; anything about the past goes to the AI.
-        if Rx(#"\b(was|were|said|saying|earlier|yesterday|did|tell|told|decide|decided|happen|happened|who|why|talk|talked|discuss|discussed)\b"#).test(q) { return nil }
+        if Rx(#"\b(was|were|said|saying|earlier|yesterday|did|tell|told|decide|decided|happen|happened|who|why|talk|talked|discuss|discussed|mention|mentioned)\b"#).test(q) { return nil }
         func list(_ items: [Item], _ empty: String, _ header: String) -> String {
             items.isEmpty ? empty : header + "\n" + items.map { "\u{2022} \($0.title)" }.joined(separator: "\n")
         }
-        if shopping.test(q) { return list(open.filter { $0.type == .buy }, "Nothing to buy on your list.", "To buy:") }
+        // "When…", "What time…": about a plan, not the list.
+        if shopping.test(q), !Rx(#"\b(when|what time)\b"#).test(q) { return list(open.filter { $0.type == .buy }, "Nothing to buy on your list.", "To buy:") }
         if todos.test(q) { return list(open.filter { $0.type == .todo }, "Nothing on your to-do list.", "Still to do:") }
         if events.test(q) {
             let upcoming = open.filter { $0.type == .event && ($0.start ?? .distantFuture) >= now.addingTimeInterval(-3600) }
                 .sorted { ($0.start ?? .distantFuture) < ($1.start ?? .distantFuture) }
             if upcoming.isEmpty { return "I haven't heard about any upcoming appointments." }
-            let f = DateFormatter(); f.dateFormat = "EEE d MMM, HH:mm"
-            let d = DateFormatter(); d.dateFormat = "EEE d MMM"
+            func formatter(_ template: String) -> DateFormatter {
+                let f = DateFormatter()
+                f.calendar = calendar; f.timeZone = calendar.timeZone; f.locale = calendar.locale ?? .current
+                f.setLocalizedDateFormatFromTemplate(template)
+                return f
+            }
+            let f = formatter("EEEdMMMjmm"), d = formatter("EEEdMMM")
             return "Coming up:\n" + upcoming.map { e in
                 "\u{2022} \(e.title): " + (e.start.map { e.allDay ? d.string(from: $0) : f.string(from: $0) } ?? "date not clear") + (e.place.map { " (\($0))" } ?? "")
             }.joined(separator: "\n")

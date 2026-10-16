@@ -14,7 +14,7 @@ struct DiagnosticsView: View {
                 }
                 .disabled(report.isEmpty)
             } footer: {
-                Text("Versions, what's ready, counts and the error log. No transcripts, names or recordings.")
+                Text("Versions, what\u{2019}s ready, counts and the error log, which notes when WTF was listening. No transcripts, names or recordings.")
             }
             Section("Report") {
                 Text(report.isEmpty ? "Gathering\u{2026}" : report)

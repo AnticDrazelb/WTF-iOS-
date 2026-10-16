@@ -16,6 +16,10 @@ final class DayDigests {
 
     private var kept: [String: Kept]
     private var busy = false
+    /// Bumped when recaps are deleted: one being written then was written from what's gone.
+    private var generation = 0
+    /// Writes and deletes of the file, in the order they were asked for.
+    private static let queue = DispatchQueue(label: "wtf.days")
 
     private static var file: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("days.json")
@@ -47,9 +51,10 @@ final class DayDigests {
         if let k = kept[key], k.from == from { return k.text }
         busy = true
         defer { busy = false }
+        let started = generation
         do {
             let text = try await Brain.day(Prompts.day(notes, today: Calendar.current.isDateInToday(day)))
-            guard !text.isEmpty else { return nil }
+            guard !text.isEmpty, generation == started else { return nil }
             kept[key] = Kept(from: from, text: text)
             save()
             return text
@@ -61,14 +66,17 @@ final class DayDigests {
 
     /// A conversation deleted: its day's recap goes until it's written again without it.
     func forget(day: Date) {
+        generation += 1
         kept[Self.key(day)] = nil
         save()
     }
 
     /// Settings › Delete All Recordings.
     func forget() {
+        generation += 1
         kept = [:]
-        try? FileManager.default.removeItem(at: Self.file)
+        let file = Self.file
+        Self.queue.async { try? FileManager.default.removeItem(at: file) }
     }
 
     private func save() {
@@ -76,7 +84,7 @@ final class DayDigests {
         kept = kept.filter { $0.key >= since } // "yyyy-MM-dd" sorts as the days do
         guard let data = try? JSONEncoder().encode(kept) else { return }
         let file = Self.file
-        Task.detached(priority: .utility) { try? data.write(to: file, options: .atomic) }
+        Self.queue.async { try? data.write(to: file, options: .atomic) }
     }
 
     static func key(_ day: Date) -> String {

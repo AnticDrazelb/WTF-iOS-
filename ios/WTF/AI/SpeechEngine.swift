@@ -42,7 +42,8 @@ actor SpeechEngine {
         let locale = await transcriberLocale()
         if Self.usesDictation {
             // Far field: the iPhone's usually on a table or in a pocket, not held to the mouth.
-            return DictationTranscriber(locale: locale, contentHints: [.farField], transcriptionOptions: [],
+            // Punctuation asked for: unlike SpeechTranscriber, it leaves it out otherwise.
+            return DictationTranscriber(locale: locale, contentHints: [.farField], transcriptionOptions: [.punctuation],
                                         reportingOptions: live ? [.volatileResults] : [.alternativeTranscriptions],
                                         attributeOptions: [.audioTimeRange, .transcriptionConfidence])
         }
@@ -167,10 +168,17 @@ actor SpeechEngine {
             for try await heard in Self.results(of: transcriber) { out += heard.words }
             return out
         }
-        if let last = try await analyzer.analyzeSequence(from: file) {
-            try await analyzer.finalizeAndFinish(through: last)
-        } else {
+        do {
+            if let last = try await analyzer.analyzeSequence(from: file) {
+                try await analyzer.finalizeAndFinish(through: last)
+            } else {
+                await analyzer.cancelAndFinishNow()
+            }
+        } catch {
+            // Nothing left waiting on a recogniser that won't finish (a bad file, or given up on).
             await analyzer.cancelAndFinishNow()
+            collector.cancel()
+            throw error
         }
         return try await collector.value
     }

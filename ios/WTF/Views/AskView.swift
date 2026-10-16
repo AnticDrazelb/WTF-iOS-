@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftData
 import SwiftUI
 import UIKit
@@ -7,6 +8,7 @@ struct AskView: View {
     @Environment(AppModel.self) private var model
     @State private var input = ""
     @FocusState private var typing: Bool
+    @State private var confirmClear = false
     @Query(AskView.latest) private var latest: [Conversation]
 
     static var latest: FetchDescriptor<Conversation> {
@@ -36,10 +38,22 @@ struct AskView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 4) {
                         if let problem = model.problem {
-                            Label(problem, systemImage: "exclamationmark.triangle.fill")
-                                .font(.footnote).foregroundStyle(.secondary)
-                                .padding(.bottom, 8)
-                                .onTapGesture { model.setListening(true) }
+                            let settings = Self.needsSettings(problem)
+                            // Starting again can't help when it's a setting that's stopping it.
+                            Button {
+                                if settings, let url = URL(string: UIApplication.openSettingsURLString) {
+                                    UIApplication.shared.open(url)
+                                } else {
+                                    model.setListening(true)
+                                }
+                            } label: {
+                                Label(problem, systemImage: "exclamationmark.triangle.fill")
+                                    .multilineTextAlignment(.leading)
+                            }
+                            .buttonStyle(.plain)
+                            .font(.footnote).foregroundStyle(.secondary)
+                            .padding(.bottom, 8)
+                            .accessibilityHint(settings ? "Opens Settings" : "Starts listening again")
                         }
                         if model.messages.isEmpty { welcome }
                         ForEach(Array(model.messages.enumerated()), id: \.element.id) { i, m in
@@ -57,15 +71,18 @@ struct AskView: View {
                             Bubble(message: m, tail: endsRun)
                                 .padding(.top, turned ? 8 : 0)
                         }
+                        // Only under an answer about one conversation: a list answer, a day's recap or
+                        // "Turn on Apple Intelligence" has no one conversation to follow up.
                         if let last = model.messages.last, !last.fromUser, !last.isError, model.status == nil,
-                           last.date > Date().addingTimeInterval(-1800) {
-                            FollowUps(conversation: model.messages.last?.about?.first ?? latest.first?.id).padding(.top, 6)
+                           last.date > Date().addingTimeInterval(-1800), Brain.notReadyReason == nil,
+                           let about = last.about, about.count == 1 {
+                            FollowUps(conversation: about[0]).padding(.top, 6)
                         }
                         if let s = model.streaming, !s.isEmpty {
                             Bubble(message: ChatMessage(fromUser: false, text: s), tail: true).padding(.top, 8)
                         } else if let status = model.status {
                             HStack(spacing: 10) {
-                                TypingBubble()
+                                TypingBubble().accessibilityHidden(true)
                                 Text(status).font(.footnote).foregroundStyle(.secondary)
                             }
                             .padding(.top, 8)
@@ -86,8 +103,7 @@ struct AskView: View {
             .safeAreaInset(edge: .top, spacing: 0) {
                 if let trail {
                     ThreadTrail(threads: trail.threads) { model.askAbout($0, in: trail.id) }
-                        .background(Color(.systemBackground))
-                        .overlay(alignment: .bottom) { Divider().opacity(0.5) }
+                        .background(.bar)
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
             }
@@ -95,8 +111,27 @@ struct AskView: View {
             .navigationTitle("Ask")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { ListeningButton() }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button("Clear Ask History\u{2026}", systemImage: "trash", role: .destructive) { confirmClear = true }
+                    } label: {
+                        Label("More", systemImage: "ellipsis")
+                    }
+                    .disabled(model.messages.isEmpty || model.status != nil)
+                }
+            }
+            .confirmationDialog("Clear Ask\u{2019}s history?", isPresented: $confirmClear, titleVisibility: .visible) {
+                Button("Clear History", role: .destructive) { model.clearAsk() }
+            } message: {
+                Text("Every question and answer in Ask goes. Your conversations stay. This can\u{2019}t be undone.")
             }
         }
+    }
+
+    /// Microphone access or Live Activities turned off: only Settings can put it right.
+    static func needsSettings(_ problem: String) -> Bool {
+        AVAudioApplication.shared.recordPermission == .denied
+            || (problem.contains("Live Activities") && !ListeningActivity.allowed)
     }
 
     private var welcome: some View {
@@ -122,6 +157,7 @@ struct AskView: View {
                 }
             }
             .background(.background.secondary, in: .rect(cornerRadius: 18))
+            .disabled(model.status != nil)
         }
         .padding(.top, 16)
     }
@@ -142,6 +178,7 @@ struct AskView: View {
                     .buttonBorderShape(.capsule)
                     .controlSize(.small)
                     .tint(.primary)
+                    .disabled(model.status != nil)
                     .padding(.horizontal, 16)
                 }
                 .onScrollPhaseChange { _, phase in
@@ -170,10 +207,12 @@ struct AskView: View {
                     .foregroundStyle(Color(.systemBackground))
                     .frame(width: 32, height: 32)
                     .background(Circle().fill(canSend ? Color.primary : Color.secondary.opacity(0.35)))
+                    // The full 44 pt to tap, the circle drawn as before.
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
             }
             .disabled(!canSend)
             .accessibilityLabel("Ask")
-            .padding(.trailing, 6).padding(.bottom, 6)
             .sensoryFeedback(.impact(weight: .light), trigger: model.messages.count)
         }
         .glassEffect(in: .rect(cornerRadius: 22))
@@ -187,6 +226,8 @@ struct AskView: View {
     }
 
     private func send() {
+        // Return while an answer's being written: the question stays in the box, not lost.
+        guard canSend else { return }
         let q = input
         input = ""
         model.ask(q)
@@ -203,6 +244,7 @@ struct Bubble: View {
         HStack {
             if message.fromUser { Spacer(minLength: 60) }
             Text(message.text)
+                .accessibilityLabel(message.fromUser ? "You: \(message.text)" : "WTF: \(message.text)")
                 .padding(.horizontal, 14).padding(.vertical, 9)
                 .foregroundStyle(message.fromUser ? Color(.systemBackground) : (message.isError ? Color.secondary : Color.primary))
                 .background(
@@ -212,10 +254,17 @@ struct Bubble: View {
                 .contextMenu {
                     Button("Copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = message.text }
                     if message.fromUser {
-                        Button("Ask Again", systemImage: "arrow.clockwise") { model.ask(message.text) }
+                        if !FollowUps.oneOff(message.text) {
+                            Button("Ask Again", systemImage: "arrow.clockwise") {
+                                model.ask(message.text, focus: FollowUps.focus(of: message))
+                            }
+                            .disabled(model.status != nil)
+                        }
                     } else {
                         ShareLink(item: message.text) { Label("Share", systemImage: "square.and.arrow.up") }
                     }
+                    Button("Delete", systemImage: "trash", role: .destructive) { model.deleteMessage(message.id) }
+                        .disabled(model.status != nil)
                 }
                 .textSelection(.enabled)
             if !message.fromUser { Spacer(minLength: 60) }
@@ -264,10 +313,10 @@ struct FollowUps: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 Button("Summarise This", systemImage: "text.alignleft") {
-                    model.ask("Summarise this conversation", focus: conversation)
+                    model.ask(Self.summarise, focus: conversation)
                 }
                 Button("What Did I Say I\u{2019}d Do?", systemImage: "checklist") {
-                    model.ask("What did I say I'd do?", focus: conversation)
+                    model.ask(Self.promised, focus: conversation)
                 }
             }
             .buttonStyle(.bordered)
@@ -279,5 +328,40 @@ struct FollowUps: View {
         .onScrollPhaseChange { _, phase in
             if phase != .idle { TabSwipe.sidewaysScrollUntil = Date().addingTimeInterval(0.6) }
         }
+    }
+
+    static let summarise = "Summarise this conversation"
+    static let promised = "What did I say I'd do?"
+
+    /// Asked again, these mean the one conversation they were asked about, not the latest.
+    static func focus(of question: ChatMessage) -> UUID? {
+        guard question.text == summarise || question.text == promised, let about = question.about, about.count == 1 else { return nil }
+        return about[0]
+    }
+
+    /// A topic tapped on the trail, or the Action button's "What came before that?": the words
+    /// alone don't say what they were about, so they aren't asked again.
+    static func oneOff(_ question: String) -> Bool {
+        question.hasPrefix("Where was I with \u{201C}") || question == "What came before that?"
+    }
+}
+
+extension AppModel {
+    /// A question goes with the answers that followed it; an answer goes on its own.
+    func deleteMessage(_ id: UUID) {
+        guard status == nil, let i = messages.firstIndex(where: { $0.id == id }) else { return }
+        var end = i + 1
+        if messages[i].fromUser {
+            while end < messages.count, !messages[end].fromUser { end += 1 }
+        }
+        messages.removeSubrange(i..<end)
+        ChatLog.save(messages)
+    }
+
+    /// Ask's history, all of it; the conversations themselves stay.
+    func clearAsk() {
+        guard status == nil else { return }
+        messages = []
+        ChatLog.save(messages)
     }
 }

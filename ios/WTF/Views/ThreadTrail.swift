@@ -57,8 +57,10 @@ struct ThreadChip: View {
     }
 }
 
-/// The threads as a list, for a conversation's page.
+/// The threads as a list, for a conversation's page. A tap asks where you were with it, in Ask;
+/// not while another answer's being written, as that tap would be lost.
 struct ThreadList: View {
+    @Environment(AppModel.self) private var model
     let threads: [TopicThread]
     let onTap: (TopicThread) -> Void
 
@@ -80,6 +82,8 @@ struct ThreadList: View {
                     Text(t.start, format: .dateTime.hour().minute()).font(.footnote).foregroundStyle(.secondary)
                 }
             }
+            .disabled(model.status != nil)
+            .accessibilityHint("Asks where you were with this topic")
         }
     }
 

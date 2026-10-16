@@ -2,17 +2,19 @@ import AppIntents
 
 /// "WTF?" from the Action button (or a Shortcut): without opening the app or unlocking. With
 /// AirPods or headphones in, the answer is read into your ears; otherwise it shows at the top
-/// of the screen. Either way it's waiting in Ask when you next open WTF.
+/// of the screen. Either way it's waiting in Ask when you next open WTF. The same as What Was I
+/// Saying?, so it's no longer offered; kept for Action buttons already set to it.
 struct AskWTFIntent: AudioPlaybackIntent {
     static let title: LocalizedStringResource = "Ask WTF"
     static let description = IntentDescription("What you were just on about: read aloud if AirPods are in, shown on screen if not. Press again for what came before.")
     static let supportedModes: IntentModes = .background
     static let authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
+    static let isDiscoverable = false
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let answer = await AppModel.shared.answerFromShortcut()
-        return .result(dialog: "\(answer)")
+        return .result(dialog: answerDialog(answer))
     }
 }
 
@@ -34,7 +36,7 @@ struct WhatWasISayingIntent: AudioPlaybackIntent {
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let answer = await AppModel.shared.answerFromShortcut()
-        return .result(dialog: "\(answer)")
+        return .result(dialog: answerDialog(answer))
     }
 }
 
@@ -65,7 +67,8 @@ struct StartListeningIntent: AudioRecordingIntent, LiveActivityIntent {
     }
 }
 
-struct StopListeningIntent: AudioRecordingIntent, LiveActivityIntent {
+/// Not an audio-recording intent: it never records, and it ends every card.
+struct StopListeningIntent: LiveActivityIntent {
     static let title: LocalizedStringResource = "Stop Listening"
     static let openAppWhenRun = false
     static let authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
@@ -88,7 +91,7 @@ struct ReadMyListIntent: AudioPlaybackIntent {
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let answer = await AppModel.shared.listFromShortcut()
-        return .result(dialog: "\(answer)")
+        return .result(dialog: answerDialog(answer))
     }
 }
 
@@ -121,17 +124,29 @@ struct WTFMenuIntent: AudioPlaybackIntent, LiveActivityIntent {
         let pick: WTFChoice
         if let choice { pick = choice } else { pick = try await $choice.requestValue("What do you need?") }
         let answer: String
+        // Only the answers are read aloud; on or off isn't.
+        var read = true
         switch pick {
         case .saying: answer = await AppModel.shared.answerFromShortcut()
         case .before: answer = await AppModel.shared.beforeThatFromShortcut()
-        case .listening: answer = await AppModel.shared.toggleListeningFromShortcut(forward: { await comeForward() })
+        case .listening:
+            answer = await AppModel.shared.toggleListeningFromShortcut(forward: { await comeForward() })
+            read = false
         case .list: answer = await AppModel.shared.listFromShortcut()
         }
-        return .result(dialog: "\(answer)")
+        return .result(dialog: read ? answerDialog(answer) : "\(answer)")
     }
 }
 
 extension AppIntent {
+    /// What Siri says or shows for an answer. With headphones in, WTF's already reading it into
+    /// them: Siri saying it as well would talk over it.
+    @MainActor
+    func answerDialog(_ answer: String) -> IntentDialog {
+        if ReadAloud.headphonesOn { return "Reading it into your headphones." }
+        return "\(answer)"
+    }
+
     /// iOS won't let WTF switch the microphone on from the background: bring WTF forward, where
     /// it can (after unlocking, if the iPhone's locked). For intents with `.foreground(.dynamic)`
     /// in their supported modes. True if WTF's now in front.
@@ -157,18 +172,17 @@ struct WTFShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(intent: WhatWasISayingIntent(),
                     phrases: ["\(.applicationName) was I saying", "What was I saying in \(.applicationName)",
-                              "\(.applicationName), what was I on about", "\(.applicationName) was I on about"],
-                    shortTitle: "What Was I Saying?", systemImageName: "ear")
-        AppShortcut(intent: AskWTFIntent(), phrases: ["Ask \(.applicationName)", "Open \(.applicationName) and ask"],
-                    shortTitle: "WTF?", systemImageName: "questionmark.bubble")
-        AppShortcut(intent: WTFMenuIntent(), phrases: ["\(.applicationName) menu", "Open the \(.applicationName) menu"],
+                              "\(.applicationName), what was I on about", "\(.applicationName) was I on about",
+                              "Ask \(.applicationName)"],
+                    shortTitle: "What Was I Saying?", systemImageName: "questionmark.bubble")
+        AppShortcut(intent: WTFMenuIntent(), phrases: ["\(.applicationName) menu", "Show the \(.applicationName) menu"],
                     shortTitle: "WTF Menu", systemImageName: "list.bullet")
         AppShortcut(intent: ReadMyListIntent(), phrases: ["Read my \(.applicationName) list", "What's on my \(.applicationName) list"],
                     shortTitle: "Read My List", systemImageName: "checklist")
         AppShortcut(intent: StartListeningIntent(), phrases: ["Start \(.applicationName)", "Start \(.applicationName) listening"],
                     shortTitle: "Start Listening", systemImageName: "waveform")
         AppShortcut(intent: StopListeningIntent(), phrases: ["Stop \(.applicationName)", "Stop \(.applicationName) listening"],
-                    shortTitle: "Stop Listening", systemImageName: "pause")
+                    shortTitle: "Stop Listening", systemImageName: "stop.fill")
         AppShortcut(intent: ToggleListeningIntent(), phrases: ["Toggle \(.applicationName) listening"],
                     shortTitle: "Listening On or Off", systemImageName: "waveform.circle")
     }
