@@ -80,6 +80,8 @@ public enum ActionRules {
         "kids", "kid", "children", "child", "son", "daughter", "mum", "mom", "dad", "nan", "nana", "gran", "grandma", "grandad",
         "granddad", "baby", "friend", "friends", "boys", "girls", "wife", "husband", "partner", "brother", "sister", "family",
         "people", "guys", "lads", "everyone", "everybody",
+        // Answering or catching something, not buying it: "I'll get the door", "grab the post".
+        "door", "phone", "post", "car", "bus", "train", "call",
     ]
     /// Collecting someone, not buying something: "pick up Ezra from school", "collect the kids from nursery".
     static let collecting = Rx(#"\b(?:pick|picking|collect|collecting|fetch|fetching)\b.{0,40}\bfrom (?:school|nursery|pre-?school|college|uni|university|work|the station|the airport|practice|training|football|swimming|club|cubs|scouts|brownies|ballet|the party|(?:his|her|their|your|my) (?:mum|mom|dad|nan|gran|grandma|grandad|friend)'?s?)\b"#)
@@ -88,6 +90,10 @@ public enum ActionRules {
         #"\b(?:i'?ll|i will|i need to|i have to|i've got to|i must|remind me to|don'?t forget to|remember to|i'm going to|i promised to)\s+(.{4,80}?)\s*(?:[.!?]|$)"#)
     /// "get it sorted", "do that", "sort this out": no idea what the task actually is.
     static let vagueTask = Rx(#"^\w+\s+(it|that|this|them|one)(\s+\w+)?$"#)
+    /// "I'll see you tomorrow", "I'm going to be sick", "I have to say…": talk, not something to do.
+    static let chatter = Rx(
+        #"^(see you|tell you|let you know|be (there|right|honest|back|fine|sick|ok|okay|late|with you)\b|say\b|bet\b|think\b|admit\b|"# +
+        #"have a (look|think)\b|take that as|get the door\b)"#)
     static let eventNoun = Rx(
         #"\b(?:([a-z]+'s) )?(appointment|dentist|dental|doctor|gp|vet|interview|meeting|party|birthday|wedding|anniversary|"# +
         #"dinner|lunch|drinks|deadline|flight|match|gig|check-up|checkup|game night|parents' evening|mot|service)\b"#)
@@ -200,7 +206,10 @@ public enum ActionRules {
     static func splitItems(_ s: String) -> [String] {
         Rx(#"\s*,\s*|\s+and\s+|\s*&\s*"#).split(s).map { piece in
             var t = piece.trimmingCharacters(in: .whitespaces)
-            for p in ["some ", "more "] where t.hasPrefix(p) { t.removeFirst(p.count) }
+            // "the milk" and "milk" are one thing: "grab the milk" matches both buy rules.
+            for p in ["some ", "more ", "a couple of ", "a few ", "the ", "an ", "a ", "new "] where t.lowercased().hasPrefix(p) {
+                t.removeFirst(p.count)
+            }
             return t
         }.filter { !$0.isEmpty }
     }
@@ -237,7 +246,7 @@ public enum ActionRules {
                     task = Rx(#"\byou\b"#, caseSensitive: true).replace(task, with: v[1])
                 }
                 task = specific(task, in: t)
-                if !buyRules.contains(where: { $0.test("I'll " + task) }) && !vagueTask.test(task) {
+                if !buyRules.contains(where: { $0.test("I'll " + task) }) && !vagueTask.test(task) && !chatter.test(task) {
                     out.append(ExtractedAction(type: .todo, title: capitalised(task), source: line))
                 }
             }
@@ -272,7 +281,10 @@ public enum ActionRules {
                 }
             }
         }
-        return out
+        // Several rules can find the same thing ("grab the milk"): each once. Not appointments:
+        // "Meeting" on Monday and "Meeting" on Thursday are two.
+        var seen = Set<String>()
+        return out.filter { $0.type == .event || seen.insert($0.type.rawValue + "|" + $0.title.lowercased()).inserted }
     }
 
     /// The AI's findings, tidied: shopping filed as a task becomes shopping; lists split up.

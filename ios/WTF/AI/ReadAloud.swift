@@ -12,8 +12,8 @@ final class ReadAloud: NSObject {
     static let shared = ReadAloud()
 
     private var synthesizer = AVSpeechSynthesizer() { didSet { synthesizer.delegate = self } }
-    private let engine = AVAudioEngine()
-    private let player = AVAudioPlayerNode()
+    private var engine = AVAudioEngine()
+    private var player = AVAudioPlayerNode()
     private var connected: AVAudioFormat?
     /// Each reading has a number, so a newer one takes over from an older one.
     private var reading = 0
@@ -34,6 +34,22 @@ final class ReadAloud: NSObject {
                   AVAudioSession.RouteChangeReason(rawValue: raw) == .oldDeviceUnavailable else { return }
             Task { @MainActor in ReadAloud.shared.headphonesGone() }
         }
+        // iOS restarted its sound system: the old engine and player are dead and must be made anew.
+        NotificationCenter.default.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { _ in
+            Task { @MainActor in ReadAloud.shared.rebuild() }
+        }
+    }
+
+    private func rebuild() {
+        Log.info("Made the read-aloud player anew after iOS restarted its sound system")
+        reading += 1
+        engine = AVAudioEngine()
+        player = AVAudioPlayerNode()
+        engine.attach(player)
+        connected = nil
+        prepared = nil
+        synthesizer = AVSpeechSynthesizer()
+        finished()
     }
 
     private func headphonesGone() {
@@ -60,6 +76,13 @@ final class ReadAloud: NSObject {
         return AVAudioSession.sharedInstance().currentRoute.outputs.contains { quiet.contains($0.portType) }
     }
 
+    /// Sound is going only to wired or USB headphones. Bluetooth isn't counted: a car or a
+    /// speaker shows up as Bluetooth too, and the mic would hear it.
+    private static var wiredOnly: Bool {
+        let outputs = AVAudioSession.sharedInstance().currentRoute.outputs
+        return !outputs.isEmpty && outputs.allSatisfy { $0.portType == .headphones || $0.portType == .usbAudio }
+    }
+
     private static var route: String {
         AVAudioSession.sharedInstance().currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ", ")
     }
@@ -75,12 +98,12 @@ final class ReadAloud: NSObject {
     /// As startIntoHeadphones, but with how long the reading lasts, in seconds (nil if it isn't
     /// played): a press's "before that?" window runs from when you've heard it, not from the press.
     func readIntoHeadphones(_ text: String) async -> TimeInterval? {
-        let ownSession = prepareSession()
+        // Checked before the session's set up, so other apps' sound isn't ducked for nothing.
         guard Self.headphonesOn else {
             Log.info("Not read aloud: sound is going to \(Self.route), not headphones")
-            if ownSession { releaseSession() }
             return nil
         }
+        let ownSession = prepareSession()
         return await start(text, voice: Self.voice, speed: Self.speed, ownSession: ownSession)
     }
 
@@ -92,9 +115,19 @@ final class ReadAloud: NSObject {
         let key = Self.key(text, Self.voice, Self.speed)
         guard prepared?.key != key else { return }
         let before = reading
-        let sound = await render(utterance(text, voice: Self.voice, speed: Self.speed))
+        let (sound, complete) = await render(utterance(text, voice: Self.voice, speed: Self.speed))
         // A reading started meanwhile stops the synthesiser: what came back may be cut short.
-        if !sound.isEmpty, before == reading { prepared = (key, sound) }
+        guard before == reading else { return }
+        // Only all of it is kept: a press would otherwise replay the cut-off sound every time.
+        // The synthesiser isn't let go of while it's saying the last resort, which would cut that off.
+        if complete, !sound.isEmpty { prepared = (key, sound) } else if !complete, handedOver == nil { abandon() }
+    }
+
+    /// The synthesiser may still be writing a render that took too long: it's stopped and
+    /// replaced, so the next one isn't queued behind it.
+    private func abandon() {
+        synthesizer.stopSpeaking(at: .immediate)
+        synthesizer = AVSpeechSynthesizer()
     }
 
     /// Settings › Read-Aloud Voice: a short sample in [voice] at [speed].
@@ -154,17 +187,25 @@ final class ReadAloud: NSObject {
         // Made into sound here (or already, if it's the answer kept ready), then played here; a
         // second go with a fresh synthesiser if the first came back empty.
         var sound: [AVAudioPCMBuffer]
+        var complete = true
         if let prepared, prepared.key == key {
             sound = prepared.sound
         } else {
-            sound = await render(utterance(text, voice: voice, speed: speed))
+            (sound, complete) = await render(utterance(text, voice: voice, speed: speed))
         }
+        // A newer reading has the synthesiser now: it isn't stopped or replaced from here.
+        guard mine == reading else { return nil }
         if sound.isEmpty {
             Log.error("Speech came back silent; trying again")
-            synthesizer = AVSpeechSynthesizer()
-            sound = await render(utterance(text, voice: voice, speed: speed))
+            abandon()
+            (sound, complete) = await render(utterance(text, voice: voice, speed: speed))
         }
         guard mine == reading else { return nil }
+        // Took too long: what came back is played, but the synthesiser is let go of.
+        if !complete {
+            Log.error("Speech took too long to make; playing what there is")
+            abandon()
+        }
         if !sound.isEmpty, let playing = startPlaying(sound) {
             Log.info("Reading an answer aloud into \(Self.route)")
             Task {
@@ -186,14 +227,14 @@ final class ReadAloud: NSObject {
         return Double(text.split(separator: " ").count) / (3 * max(speed, 0.1))
     }
 
-    /// The speech as sound, or nothing if the synthesiser didn't produce any within 6 s.
-    private func render(_ utterance: AVSpeechUtterance) async -> [AVAudioPCMBuffer] {
+    /// The speech as sound, and whether it's all there: what the synthesiser produced within 6 s.
+    private func render(_ utterance: AVSpeechUtterance) async -> ([AVAudioPCMBuffer], Bool) {
         let collected = Collected()
         await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
             collected.wait(done)
             synthesizer.write(utterance) { buffer in
                 guard let pcm = buffer as? AVAudioPCMBuffer, pcm.frameLength > 0 else {
-                    collected.finish()
+                    collected.done()
                     return
                 }
                 if let copy = Self.floatCopy(pcm) { collected.add(copy) }
@@ -203,7 +244,7 @@ final class ReadAloud: NSObject {
                 collected.finish()
             }
         }
-        return collected.buffers
+        return (collected.buffers, collected.complete)
     }
 
     /// Starts playing [sound]: how long it lasts, and a wait that ends once it's been heard (or
@@ -230,7 +271,8 @@ final class ReadAloud: NSObject {
                 player.scheduleBuffer(buffer, completionHandler: nil)
             }
         }
-        Recorder.shared.speaking = true // what WTF says isn't recorded
+        // What WTF says isn't recorded, unless it's only in wired headphones the mic can't hear.
+        if !Self.wiredOnly { Recorder.shared.speaking = true }
         player.play()
         return (seconds, {
             await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
@@ -260,8 +302,11 @@ final class ReadAloud: NSObject {
         private var _buffers: [AVAudioPCMBuffer] = []
         private var waiting: CheckedContinuation<Void, Never>?
         private var finished = false
+        private var _complete = false
 
         var buffers: [AVAudioPCMBuffer] { lock.lock(); defer { lock.unlock() }; return _buffers }
+        /// It ended because the synthesiser said it was done, not because it took too long.
+        var complete: Bool { lock.lock(); defer { lock.unlock() }; return _complete }
 
         func wait(_ c: CheckedContinuation<Void, Never>) {
             lock.lock()
@@ -273,6 +318,14 @@ final class ReadAloud: NSObject {
         func add(_ b: AVAudioPCMBuffer) {
             lock.lock(); defer { lock.unlock() }
             if !finished { _buffers.append(b) }
+        }
+
+        /// All of it is there: a timeout after this doesn't undo that.
+        func done() {
+            lock.lock()
+            if !finished { _complete = true }
+            lock.unlock()
+            finish()
         }
 
         func finish() {

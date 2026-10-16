@@ -23,9 +23,6 @@ actor Pipeline {
     /// Each with the words the recogniser doubted and the ones it was sure of, for fixing misheard words.
     private var toFollow: [(id: UUID, text: String, from: Date, to: Date, doubts: [Doubt], protected: Set<String>)] = []
 
-    /// Conversations whose summary failed, and how often (see summarise).
-    private var summaryFailures: [UUID: Int] = [:]
-
     /// The conversation going on was deleted: what's still being recorded or waiting to be
     /// transcribed would have joined it, so it goes too, rather than coming back as a new one.
     func cutOff() {
@@ -55,6 +52,13 @@ actor Pipeline {
     func addChunk(url: URL, start: Date, end: Date) {
         guard start >= wipedAt else {
             try? FileManager.default.removeItem(at: url)
+            return
+        }
+        // Already taken in as one WTF was ended part-way through (see sweepAudio): not twice.
+        let path: String? = url.path
+        if let known = (try? modelContext.fetch(FetchDescriptor<Chunk>(predicate: #Predicate { $0.path == path })))?.first {
+            known.end = max(known.end, end)
+            try? modelContext.save()
             return
         }
         modelContext.insert(Chunk(start: start, end: end, path: url.path))
@@ -149,7 +153,7 @@ actor Pipeline {
                     if !keepAudio { forgetAudio(of: cid) }
                     try? modelContext.save()
                     toFollow.append((cid, text, chunk.start, chunk.end, Doubts.of(words), Doubts.protected(words)))
-                    await suggest(for: c, found: ruleActions(c))
+                    await suggest(for: c, found: ruleActions(c, new: text))
                     guard wiped == generation else { return false }
                     // Deleted in the app meanwhile, with its chunks: gone() can't see that from here.
                     guard conversation(cid) != nil else { continue }
@@ -194,8 +198,20 @@ actor Pipeline {
         let generation = wiped
         sweepAudio()
         let quietBefore = Date().addingTimeInterval(-Double(gapMinutes) * 60)
-        let waiting = ((try? modelContext.fetch(FetchDescriptor<Conversation>(
-            predicate: #Predicate { $0.summary == nil }))) ?? []).filter { $0.closed || $0.end < quietBefore }.map(\.id)
+        // One whose summary just failed is tried again in a while, not on the very next recording.
+        let retryBefore = Date().addingTimeInterval(-600)
+        var over = ((try? modelContext.fetch(FetchDescriptor<Conversation>(
+            predicate: #Predicate { $0.summary == nil }))) ?? []).filter {
+            ($0.closed || $0.end < quietBefore) && ($0.summaryTriedAt ?? .distantPast) < retryBefore
+        }
+        // Without Apple Intelligence no summary can be written: only ones still to close, or with
+        // audio to hear again, are worth a look, not every one kept, on every recording.
+        if Brain.notReadyReason != nil {
+            let withAudio = Set(((try? modelContext.fetch(FetchDescriptor<Chunk>(
+                predicate: #Predicate { $0.status == "done" && $0.path != nil }))) ?? []).compactMap(\.conversationID))
+            over = over.filter { !$0.closed || withAudio.contains($0.id) }
+        }
+        let waiting = over.map(\.id)
         for id in waiting {
             guard wiped == generation else { return }
             await summarise(id)
@@ -235,13 +251,24 @@ actor Pipeline {
         let referenced = Set(((try? modelContext.fetch(FetchDescriptor<Chunk>(predicate: #Predicate { $0.path != nil }))) ?? []).compactMap(\.path))
         let dir = Recorder.audioDirectory
         let tenMinutesAgo = Date().addingTimeInterval(-600)
+        let keptFrom = Date().addingTimeInterval(-Double(keepDays) * 86_400)
         for name in (try? fm.contentsOfDirectory(atPath: dir.path)) ?? [] {
             let path = dir.appendingPathComponent(name).path
             let modified = (try? fm.attributesOfItem(atPath: path)[.modificationDate] as? Date) ?? Date()
             // A recording still being made isn't in the database yet: only ones well finished go.
-            if name.hasPrefix("whole_") || (!referenced.contains(path) && modified < tenMinutesAgo) {
-                try? fm.removeItem(atPath: path)
+            guard name.hasPrefix("whole_") || (!referenced.contains(path) && modified < tenMinutesAgo) else { continue }
+            // WTF was ended (by iOS, say) while this was being recorded: what was said is still
+            // transcribed, rather than lost. Its name is when it began.
+            if name.hasPrefix("chunk_"), name.hasSuffix(".wav"), let ms = Double(name.dropFirst(6).dropLast(4)) {
+                let start = Date(timeIntervalSince1970: ms / 1000)
+                let url = URL(fileURLWithPath: path)
+                if start > keptFrom, let seconds = Self.mend(url), seconds >= 1.5 {
+                    Log.info("Found \(Int(seconds)) s recorded at \(start.formatted(date: .omitted, time: .standard)) when WTF was ended: it'll be transcribed")
+                    addChunk(url: url, start: start, end: start.addingTimeInterval(seconds))
+                    continue
+                }
             }
+            try? fm.removeItem(atPath: path)
         }
     }
 
@@ -359,11 +386,16 @@ actor Pipeline {
 
     /// Conversations deleted (by the app): recordings from their time still waiting to be
     /// transcribed (a retry) go too, rather than coming back later as a new conversation.
+    /// One made after it ends goes only if it's a retry: one not tried yet may be the start of the
+    /// next conversation (listening paused and started again), and that's kept.
     func drop(spans: [(start: Date, end: Date)]) {
         guard !spans.isEmpty else { return }
         let gap = Double(gapMinutes * 60)
         let waiting = (try? modelContext.fetch(FetchDescriptor<Chunk>(predicate: #Predicate { $0.status == "pending" && $0.conversationID == nil }))) ?? []
-        for chunk in waiting where spans.contains(where: { chunk.start >= $0.start.addingTimeInterval(-gap) && chunk.start <= $0.end.addingTimeInterval(gap) }) {
+        for chunk in waiting where spans.contains(where: {
+            chunk.start >= $0.start.addingTimeInterval(-gap)
+                && (chunk.start <= $0.end || (chunk.attempts > 0 && chunk.start <= $0.end.addingTimeInterval(gap)))
+        }) {
             if let path = chunk.path { try? FileManager.default.removeItem(atPath: path) }
             modelContext.delete(chunk)
         }
@@ -746,11 +778,14 @@ actor Pipeline {
         return s + c.start.timeIntervalSince1970 / 1e10 // newer wins ties
     }
 
+    /// In the iPhone's own clock (12 or 24 hours): the AI copies it into its answers.
     private func label(_ c: Conversation) -> String {
+        let today = Calendar.current.isDateInToday(c.start)
         let f = DateFormatter()
-        f.dateFormat = Calendar.current.isDateInToday(c.start) ? "'Today' HH:mm" : "EEE d MMM HH:mm"
-        let e = DateFormatter(); e.dateFormat = "HH:mm"
-        return "\(f.string(from: c.start))–\(e.string(from: c.end))"
+        f.setLocalizedDateFormatFromTemplate(today ? "jmm" : "EEEdMMMjmm")
+        let e = DateFormatter()
+        e.setLocalizedDateFormatFromTemplate("jmm")
+        return "\(today ? "Today " : "")\(f.string(from: c.start))–\(e.string(from: c.end))"
     }
 
     /// The conversation a recording carries on, if it's soon enough after the last one. A
@@ -856,7 +891,7 @@ actor Pipeline {
         c.transcript = c.transcript.replacingOccurrences(of: text, with: fixed)
         try? modelContext.save()
         Log.info("Corrected misheard words in \(zip(lines, fixedLines).filter { $0.0 != $0.1 }.count) line(s)")
-        await suggest(for: c, found: ruleActions(c))
+        await suggest(for: c, found: ruleActions(c, new: fixed))
         return fixed
     }
 
@@ -888,10 +923,19 @@ actor Pipeline {
         ((try? modelContext.fetch(FetchDescriptor<Person>())) ?? []).map(\.voice)
     }
 
-    private func ruleActions(_ c: Conversation) -> [ExtractedAction] {
+    /// [new]: only the lines just added (and the one before, for what led up to them) are looked
+    /// through, as the rest were when they came in: a conversation can run for hours, and this is
+    /// done for every recording.
+    private func ruleActions(_ c: Conversation, new: String? = nil) -> [ExtractedAction] {
+        var said = c.transcript
+        if let new, !new.isEmpty, let r = c.transcript.range(of: new, options: .backwards) {
+            let head = c.transcript[..<r.lowerBound].dropLast() // the line break before it
+            let from = head.lastIndex(of: "\n").map { head.index(after: $0) } ?? head.startIndex
+            said = String(c.transcript[from..<r.upperBound])
+        }
         // Once WTF knows your voice, to-dos are what you said you'd do; until then, any line could be yours.
-        ActionRules.ruleActions(ActionRules.candidateLines(c.transcript), conversationStart: c.start, title: c.title,
-                                youOnly: c.transcript.contains("] \(Labels.me): "))
+        return ActionRules.ruleActions(ActionRules.candidateLines(said), conversationStart: c.start, title: c.title,
+                                       youOnly: c.transcript.contains("] \(Labels.me): "))
     }
 
     /// A conversation that's over: heard again as a whole, then its title, summary, list items
@@ -920,16 +964,20 @@ actor Pipeline {
         guard let written else {
             // Tried again on later runs, but not for ever: after three goes it's called just
             // "Conversation", rather than "Summarising…" for good and an AI call on every recording.
-            summaryFailures[id, default: 0] += 1
-            Log.error("Couldn't summarise a \(transcript.count)-character conversation (try \(summaryFailures[id]!))")
-            if summaryFailures[id]! >= 3, let c = conversation(id) {
+            // Counted on the conversation, so being ended in the background doesn't start it again.
+            guard let c = conversation(id) else { return }
+            let tries = (c.summaryAttempts ?? 0) + 1
+            c.summaryAttempts = tries
+            c.summaryTriedAt = Date()
+            Log.error("Couldn't summarise a \(transcript.count)-character conversation (try \(tries))")
+            if tries >= 3 {
                 if c.title == nil { c.title = "Conversation" }
                 c.summary = ""
                 // Its facts and list items are still looked for: they're asked for separately.
                 c.extracted = false
-                try? modelContext.save()
-                await extract(id)
             }
+            try? modelContext.save()
+            if tries >= 3 { await extract(id) }
             return
         }
         guard let c = conversation(id) else { return }
@@ -984,9 +1032,22 @@ actor Pipeline {
             guard let was = item.start, let now = a.resolved?.start() else { return item.start == nil && a.resolved?.start() == nil }
             return Calendar.current.isDate(was, inSameDayAs: now)
         }
+        // This conversation's own one, moved to another day ("actually, it's Thursday now"), is
+        // suggested again for the new day. One with no day said is the one already suggested, as
+        // is one from the very words it was suggested from (you may have changed its day since).
+        func sameAsMine(_ item: ActionItem, _ a: ExtractedAction) -> Bool {
+            guard matches(item, a) else { return false }
+            if a.resolved?.start() == nil || sameDay(item, a) { return true }
+            let quote = a.source.map { Self.heard($0, about: a, on: c.start).quote } ?? a.whenText
+            return quote != nil && quote == item.quote
+        }
+        func onSameDay(_ x: ExtractedAction, _ y: ExtractedAction) -> Bool {
+            guard x.type == .event, let p = x.resolved?.start(), let q = y.resolved?.start() else { return true }
+            return Calendar.current.isDate(p, inSameDayAs: q)
+        }
         var fresh: [ExtractedAction] = []
-        for a in found where !mine.contains(where: { matches($0, a) }) && !open.contains(where: { matches($0, a) && sameDay($0, a) })
-            && !fresh.contains(where: { $0.type == a.type && $0.title.lowercased() == a.title.lowercased() }) {
+        for a in found where !mine.contains(where: { sameAsMine($0, a) }) && !open.contains(where: { matches($0, a) && sameDay($0, a) })
+            && !fresh.contains(where: { $0.type == a.type && $0.title.lowercased() == a.title.lowercased() && onSameDay($0, a) }) {
             fresh.append(a)
         }
         // Appointments checked against the calendar: already there, nothing to suggest; there at
@@ -1044,6 +1105,44 @@ extension Pipeline {
             at = Calendar.current.date(bySettingHour: Int(m[1])!, minute: Int(m[2])!, second: Int(m[3])!, of: day)
         }
         return (quote, at)
+    }
+}
+
+extension Pipeline {
+    /// A recording WTF was ended part-way through: the lengths in its header were never written,
+    /// so they're put right from the file's size. The seconds of audio in it, or nil if it isn't
+    /// a WAV file that can be read.
+    nonisolated static func mend(_ url: URL) -> Double? {
+        guard let file = try? FileHandle(forUpdating: url) else { return nil }
+        defer { try? file.close() }
+        guard let size = try? file.seekToEnd(), size > 44, size < UInt64(UInt32.max) else { return nil }
+        guard (try? file.seek(toOffset: 0)) != nil, let read = try? file.read(upToCount: 8192) else { return nil }
+        let head = [UInt8](read)
+        func word(_ at: Int) -> Int { Int(head[at]) | Int(head[at + 1]) << 8 | Int(head[at + 2]) << 16 | Int(head[at + 3]) << 24 }
+        func name(_ at: Int) -> String { String(decoding: head[at..<at + 4], as: UTF8.self) }
+        guard head.count >= 12, name(0) == "RIFF", name(8) == "WAVE" else { return nil }
+        var bytesPerSecond = 32_000 // 16 kHz, 16-bit, one channel: as Recorder writes them
+        var at = 12
+        while at + 8 <= head.count {
+            let length = word(at + 4)
+            if name(at) == "fmt ", at + 20 <= head.count, word(at + 16) > 0 { bytesPerSecond = word(at + 16) }
+            if name(at) == "data" {
+                let start = at + 8
+                var bytes = Int(size) - start
+                bytes -= bytes % 2
+                guard bytes > 0 else { return nil }
+                func le(_ n: Int) -> Data { withUnsafeBytes(of: UInt32(n).littleEndian) { Data($0) } }
+                do {
+                    try file.seek(toOffset: 4)
+                    try file.write(contentsOf: le(start + bytes - 8))
+                    try file.seek(toOffset: UInt64(at + 4))
+                    try file.write(contentsOf: le(bytes))
+                } catch { return nil }
+                return Double(bytes) / Double(bytesPerSecond)
+            }
+            at += 8 + length + (length & 1)
+        }
+        return nil
     }
 }
 

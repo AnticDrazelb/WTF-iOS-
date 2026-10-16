@@ -34,6 +34,7 @@ struct DiagnosticsView: View {
         let device = withUnsafeBytes(of: name.machine) { String(decoding: $0.prefix(while: { $0 != 0 }), as: UTF8.self) }
         let info = Bundle.main.infoDictionary ?? [:]
         let speech = await SpeechEngine.shared.isReady()
+        let language = await SpeechEngine.shared.language()
         let health = await model.pipeline.health()
         return """
             WTF \(info["CFBundleShortVersionString"] as? String ?? "?") (build \(info["CFBundleVersion"] as? String ?? "?"))
@@ -47,7 +48,7 @@ struct DiagnosticsView: View {
             Pill, Lock Screen card and controls: \(ListeningActivity.drawable ? "installed" : "MISSING (reinstall WTF and keep its app extension)"), Live Activities \(ListeningActivity.allowed ? "allowed" : "turned off"), showing: \(ListeningActivity.states)
             Contacts: \(PersonalWords.useContacts && PersonalWords.contactsAllowed ? "used" : "not used"), calendar: \(PersonalWords.useCalendar && PersonalWords.calendarAllowed ? "used" : "not used")
             Corrections learnt: \(Learned.fixes.count)
-            Speech recogniser: \(SpeechEngine.recogniserName), \(speech ? "ready" : "not installed")
+            Speech recogniser: \(SpeechEngine.recogniserName), \(speech ? "ready" : "not installed"), in \(language) (iPhone: \(Locale.preferredLanguages.first ?? "?"), app: \(Locale.current.identifier))
             Better Accuracy (Parakeet): \(Parakeet.inUse ? "on" : Parakeet.enabled ? (Parakeet.downloaded ? "on, but not for this language" : "on, not downloaded") : "off")
             Apple Intelligence: \(Brain.notReadyReason ?? "ready")
             Voices: \(VoiceEngine.enabled ? "on" : "off"), models \(VoiceEngine.downloaded ? "downloaded" : "not downloaded")

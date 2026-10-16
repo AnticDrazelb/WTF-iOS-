@@ -31,8 +31,13 @@ struct WTFListeningControlIntent: LiveActivityIntent, AudioRecordingIntent {
 
     func perform() async throws -> some IntentResult {
         #if !WIDGET
+        // The card coming or going says it worked: only a press that didn't take is reported, so
+        // a start doesn't chime and cover the new card, and a stop doesn't leave a notification.
+        let was = await AppModel.shared.recording
         let result = await AppModel.shared.toggleListeningFromShortcut()
-        await AppModel.shared.showAnswer(result)
+        if await AppModel.shared.recording == was {
+            await AppModel.shared.showAnswer(result)
+        }
         #endif
         return .result()
     }

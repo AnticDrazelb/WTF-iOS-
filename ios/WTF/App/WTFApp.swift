@@ -65,10 +65,11 @@ struct RootView: View {
     private var tabs: some View {
         @Bindable var model = model
         return TabView(selection: $model.tab) {
-            Tab("Ask", systemImage: "bubble.left.and.text.bubble.right", value: 0) { AskView().modifier(TabSwipe()) }
-            Tab("Timeline", systemImage: "clock", value: 1) { TimelineView().modifier(TabSwipe()) }
-            Tab("Lists", systemImage: "checklist", value: 2) { ListsView() } // no tab swipe: rows swipe to delete
-            Tab("Settings", systemImage: "gear", value: 3) { SettingsView().modifier(TabSwipe()) }
+            // Tabs change from the tab bar only, as in other iOS apps: rows swipe to delete.
+            Tab("Ask", systemImage: "bubble.left.and.text.bubble.right", value: 0) { AskView() }
+            Tab("Timeline", systemImage: "clock", value: 1) { TimelineView() }
+            Tab("Lists", systemImage: "checklist", value: 2) { ListsView() }
+            Tab("Settings", systemImage: "gear", value: 3) { SettingsView() }
         }
         // Black and white throughout; colour only where it means something (switches, deleting).
         .tint(.primary)
@@ -152,9 +153,8 @@ struct StopListeningSheet: View {
     }
 }
 
-/// Swipe left or right anywhere on a screen to go to the next or previous tab, as well as tapping
-/// the tab bar. Not while a page is open on top (swiping right goes back there), not from the
-/// screen's edge, and not when the swipe was scrolling something sideways (the thread trail).
+/// No longer used (tabs change from the tab bar only); kept until AskView stops setting
+/// sidewaysScrollUntil, then to be deleted. It changed tab with a swipe anywhere on a screen.
 struct TabSwipe: ViewModifier {
     @Environment(AppModel.self) private var model
     /// Set by anything that scrolls sideways itself, so its swipes don't change tab.
@@ -178,16 +178,17 @@ struct TabSwipe: ViewModifier {
 }
 
 /// Listening on or off, in words, in the app's quiet black and white: "Listen" with a still
-/// waveform when it's off, a moving one and "Listening" when it's on (tap to pause), and "Paused"
+/// waveform when it's off, a moving one and "Listening" when it's on (tap to stop), and "Paused"
 /// while something else (a call, Siri) has the microphone.
 struct ListeningButton: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
         // While a start's under way (the first can be a long download), a tap gives up on it.
-        // Paused (a call or Siri took the microphone): a tap tries to carry on.
+        // Paused (a call or Siri took the microphone): a tap tries to carry on, and says why if
+        // it can't, as Ask's banner does.
         Button {
-            if model.recording && model.paused { model.resumeIfNeeded() }
+            if model.recording && model.paused { model.setListening(true) }
             else { model.setListening(model.isStarting ? false : !model.recording) }
         } label: {
             HStack(spacing: 6) {
@@ -205,17 +206,18 @@ struct ListeningButton: View {
             .foregroundStyle(.primary)
             .padding(.horizontal, 4)
         }
-        .accessibilityHint(model.recording ? (model.paused ? "Tries to carry on listening" : "Pauses listening") : model.isStarting ? "Cancels starting" : "Starts listening")
+        .accessibilityHint(model.recording ? (model.paused ? "Tries to carry on listening" : "Stops listening") : model.isStarting ? "Cancels starting" : "Starts listening")
         .sensoryFeedback(.impact(weight: .medium), trigger: model.recording)
     }
 }
 
 /// The first time WTF opens: what it does with what it hears, before it's asked for the microphone.
 struct WelcomeSheet: View {
+    @Environment(AppModel.self) private var model
     let done: () -> Void
 
     var body: some View {
-        // The points scroll and Continue stays in reach, so at large text sizes none of it is cut off.
+        // The points scroll and the buttons stay in reach, so at large text sizes none of it is cut off.
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 Text("Before WTF listens").font(.largeTitle.bold()).padding(.top, 36)
@@ -229,13 +231,21 @@ struct WelcomeSheet: View {
         }
         .safeAreaInset(edge: .bottom) {
             VStack(spacing: 12) {
-                Button(action: done) {
-                    Text("Continue").font(.headline)
+                // Straight on to listening (and the microphone prompt), rather than to an Ask
+                // with nothing heard yet.
+                Button {
+                    done()
+                    model.setListening(true)
+                } label: {
+                    Text("Start Listening").font(.headline)
                         .foregroundStyle(Color(uiColor: .systemBackground))
                         .frame(maxWidth: .infinity, minHeight: 50)
                         .background(Capsule().fill(Color.primary))
                 }
                 .buttonStyle(.plain)
+                Button("Not Now", action: done)
+                    .font(.headline).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 44)
                 Link("Privacy Policy", destination: SettingsView.privacyPolicy)
                     .font(.footnote).foregroundStyle(.secondary).frame(maxWidth: .infinity)
             }

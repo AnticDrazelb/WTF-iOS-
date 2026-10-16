@@ -8,8 +8,10 @@ struct TimelineView: View {
     @Query(sort: \Conversation.start, order: .reverse) private var conversations: [Conversation]
     @Query(filter: #Predicate<Chunk> { $0.status == "pending" }) private var pending: [Chunk]
     @State private var query = ""
-    @State private var deleting: Conversation?
-    @State private var renaming: Conversation?
+    /// Which conversation the alerts are about, by id: one deleted while they're up (expiry) is
+    /// then simply not found, rather than a deleted model being written to.
+    @State private var deleting: UUID?
+    @State private var renaming: UUID?
     @State private var newTitle = ""
     /// What the search found, worked out once typing pauses: not on every keystroke, as a week
     /// of transcripts runs to megabytes. Nil until the first search has finished.
@@ -22,10 +24,14 @@ struct TimelineView: View {
         return visible.filter { matches.contains($0.persistentModelID) }
     }
 
-    private func search(_ q: String) -> Set<PersistentIdentifier> {
-        Set(conversations.filter { c in
-            [c.title, c.summary, c.transcript].contains { $0?.localizedStandardContains(q) == true }
-        }.map(\.persistentModelID))
+    /// Off the main thread, so a week of transcripts doesn't hold up scrolling.
+    nonisolated private static func search(_ q: String, in docs: [(key: PersistentIdentifier, text: [String?])]) -> Set<PersistentIdentifier> {
+        Set(docs.filter { doc in doc.text.contains { $0?.localizedStandardContains(q) == true } }.map { $0.key })
+    }
+
+    /// A conversation still showing (not one being deleted), by id.
+    private func find(_ id: UUID?) -> Conversation? {
+        conversations.first { $0.id == id && !model.hiding.contains($0.persistentModelID) }
     }
 
     /// The days, newest first, each with its conversations.
@@ -53,6 +59,11 @@ struct TimelineView: View {
                         if !searching {
                             YourDayRow(day: day, conversations: list)
                                 .background { NavigationLink(value: DayRef(day: day)) { EmptyView() }.opacity(0) }
+                                // One stop for VoiceOver, as the hidden link above isn't read.
+                                .accessibilityElement(children: .combine)
+                                .accessibilityAddTraits(.isButton)
+                                .accessibilityHint("Opens your day")
+                                .accessibilityAction { model.timelinePath.append(DayRef(day: day)) }
                                 .listRowSeparator(.hidden)
                                 .listRowBackground(Color.clear)
                                 .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 4, trailing: 16))
@@ -60,6 +71,10 @@ struct TimelineView: View {
                         ForEach(list) { c in
                             TimelineEntry(conversation: c)
                                 .background { NavigationLink(value: c) { EmptyView() }.opacity(0) }
+                                .accessibilityElement(children: .combine)
+                                .accessibilityAddTraits(.isButton)
+                                .accessibilityHint("Opens the conversation")
+                                .accessibilityAction { model.timelinePath.append(c) }
                                 .listRowSeparator(.hidden)
                                 .listRowBackground(Color.clear)
                                 .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 16))
@@ -76,8 +91,12 @@ struct TimelineView: View {
                                         }
                                     }
                                     ShareLink(item: shareText(c)) { Label("Share", systemImage: "square.and.arrow.up") }
-                                    Button("Rename\u{2026}", systemImage: "pencil") { newTitle = c.title ?? ""; renaming = c }
-                                    Button("Delete", systemImage: "trash", role: .destructive) { deleting = c }
+                                    Button("Rename\u{2026}", systemImage: "pencil") { newTitle = c.title ?? ""; renaming = c.id }
+                                    Button("Delete", systemImage: "trash", role: .destructive) { deleting = c.id }
+                                }
+                                // As in Lists: swipe to delete.
+                                .swipeActions(edge: .trailing) {
+                                    Button("Delete", systemImage: "trash", role: .destructive) { deleting = c.id }
                                 }
                         }
                     } header: {
@@ -95,12 +114,16 @@ struct TimelineView: View {
                 }
             }
             .searchable(text: $query, prompt: "Search everything you've heard")
-            .task(id: "\(query)|\(conversations.count)") {
+            // Again as the live conversation grows (the newest), so words just said are found.
+            .task(id: "\(query)|\(conversations.count)|\(conversations.first?.transcript.utf8.count ?? 0)") {
                 let q = query.trimmingCharacters(in: .whitespaces)
                 guard q.count >= 2 else { matches = nil; return }
                 try? await Task.sleep(for: .milliseconds(200))
                 guard !Task.isCancelled else { return }
-                matches = search(q)
+                let docs = conversations.map { (key: $0.persistentModelID, text: [$0.title, $0.summary, $0.transcript]) }
+                let found = await Task.detached(priority: .userInitiated) { Self.search(q, in: docs) }.value
+                guard !Task.isCancelled else { return }
+                matches = found
             }
             // The latest words, not the summaries and second hearing queued behind them: those
             // carry on afterwards, so the spinner doesn't wait a minute for them.
@@ -113,12 +136,12 @@ struct TimelineView: View {
             .alert("Rename", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
                 TextField("Title", text: $newTitle)
                 Button("Cancel", role: .cancel) {}
-                Button("Save") { if let c = renaming { renameConversation(c, to: newTitle) } }
+                Button("Save") { if let c = find(renaming) { renameConversation(c, to: newTitle) } }
                     .disabled(newTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             .confirmationDialog("Delete this conversation?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
                 Button("Delete", role: .destructive) {
-                    if let id = deleting?.id { Task { await model.deleteConversation(id) } }
+                    if let id = deleting { Task { await model.deleteConversation(id) } }
                     deleting = nil
                 }
             } message: {
@@ -161,7 +184,9 @@ struct TimelineEntry: View {
     @Environment(AppModel.self) private var model
     let conversation: Conversation
 
-    private var live: Bool { !conversation.closed && conversation.summary == nil }
+    /// Only while it's actually being heard: not while a call has the microphone, or once
+    /// listening's stopped and the conversation's waiting to be closed.
+    private var live: Bool { !conversation.closed && conversation.summary == nil && model.recording && !model.paused }
 
     var body: some View {
         let topics = Threads.layout(conversation.threads)
@@ -306,9 +331,13 @@ struct ConversationView: View {
     var body: some View {
         List {
             Section {
-                Text("\(dayLabel(conversation.start)), \(conversation.start.formatted(date: .omitted, time: .shortened))\u{2013}\(conversation.end.formatted(date: .omitted, time: .shortened))")
-                    .font(.subheadline).foregroundStyle(.secondary)
-                    .listRowBackground(Color.clear)
+                // The title in full: the bar's is cut short between its buttons.
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(displayTitle(conversation)).font(.title2.bold())
+                    Text("\(dayLabel(conversation.start)), \(conversation.start.formatted(date: .omitted, time: .shortened))\u{2013}\(conversation.end.formatted(date: .omitted, time: .shortened))")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                }
+                .listRowBackground(Color.clear)
             }
             if let summary = conversation.summary, !summary.isEmpty {
                 Section("Summary") { Text(summary) }
@@ -413,6 +442,7 @@ struct ConversationView: View {
             TextField("Name", text: $typed).textInputAutocapitalization(.words)
             Button("Cancel", role: .cancel) {}
             Button("Save") { if let label = naming { name(label, as: typed) } }
+                .disabled(typed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         } message: {
             Text("WTF will recognise their voice from now on, here and in your other conversations.")
         }
@@ -566,7 +596,8 @@ enum DeclinedNames {
 /// Its title, or what's happening until it has one.
 func displayTitle(_ c: Conversation) -> String {
     if let title = c.title { return title }
-    if !c.closed { return "Listening\u{2026}" }
+    // Not "Listening": that's the listening control's word, and it may be paused or stopped.
+    if !c.closed { return "In Progress" }
     return Brain.notReadyReason == nil ? "Summarising\u{2026}" : "Conversation"
 }
 

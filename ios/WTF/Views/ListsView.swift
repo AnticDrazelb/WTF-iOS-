@@ -12,6 +12,8 @@ struct ListsView: View {
     @State private var drafts: [String: String] = [:]
     @State private var ticking: Set<UUID> = []
     @State private var calendarItem: ActionItem?
+    /// The list being added to: kept after Return, so the next item can be typed straight away.
+    @FocusState private var adding: String?
     /// Ticked items too, at the bottom of each list, so one ticked by mistake can be put back.
     @AppStorage("listsShowCompleted") private var showCompleted = false
 
@@ -108,7 +110,15 @@ struct ListsView: View {
                     Image(systemName: "plus.circle").font(.title2).foregroundStyle(.tertiary)
                     TextField(group.id == "BUY" ? "Add to shopping" : "Add to-do", text: Binding(
                         get: { drafts[group.id] ?? "" }, set: { drafts[group.id] = $0 }))
-                        .onSubmit { add(group.id) }
+                        .focused($adding, equals: group.id)
+                        .submitLabel(.next)
+                        .onSubmit {
+                            let typed = !(drafts[group.id] ?? "").trimmingCharacters(in: .whitespaces).isEmpty
+                            add(group.id)
+                            // Return ends editing first; then back to the field, as in Reminders.
+                            // Return on an empty field puts the keyboard away.
+                            if typed { Task { adding = group.id } }
+                        }
                 }
             } else if waiting.isEmpty && kept.isEmpty && !(showCompleted && !completed(group.id).isEmpty) {
                 Text(group.empty).font(.subheadline).foregroundStyle(.secondary)

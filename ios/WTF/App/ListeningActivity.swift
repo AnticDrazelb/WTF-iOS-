@@ -1,5 +1,6 @@
 import ActivityKit
 import Foundation
+import UIKit
 import WTFCore
 
 /// Keeps the Live Activity in step with listening and the thread map.
@@ -24,6 +25,20 @@ final class ListeningActivity {
         return all.isEmpty ? "none" : all.map { String(describing: $0.activityState) }.joined(separator: ", ")
     }
 
+    private init() {
+        // Swiped away in the app switcher: the card goes too, rather than saying "Listening" for a
+        // quarter of an hour over nothing. Waited for (briefly), as WTF's about to be gone; not
+        // through stop(), whose tasks need the main thread, which is the one waiting here.
+        NotificationCenter.default.addObserver(forName: UIApplication.willTerminateNotification, object: nil, queue: nil) { _ in
+            let done = DispatchSemaphore(value: 0)
+            Task.detached {
+                for card in Activity<ListeningAttributes>.activities { await card.end(nil, dismissalPolicy: .immediate) }
+                done.signal()
+            }
+            _ = done.wait(timeout: .now() + 1)
+        }
+    }
+
     private var activity: Activity<ListeningAttributes>?
     private var state = ListeningAttributes.ContentState(topic: nil, trail: [], since: Date(), hanging: 0)
 
@@ -35,11 +50,13 @@ final class ListeningActivity {
         return activity.activityState == .active || activity.activityState == .stale
     }
 
-    /// A new card for a new listening session: no topics yet.
-    func start() {
-        guard !showing, Self.allowed else { return }
+    /// A new card for a new listening session: no topics yet. Whether it's up: iOS can say no.
+    @discardableResult
+    func start() -> Bool {
+        guard !showing else { return true }
+        guard Self.allowed else { return false }
         state = ListeningAttributes.ContentState(topic: nil, trail: [], since: Date(), hanging: 0, heard: AppModel.shared.hasHeard)
-        request()
+        return request()
     }
 
     /// While listening, the card back if iOS ended it or it was swiped away: with the topics it
@@ -51,7 +68,10 @@ final class ListeningActivity {
         // iOS only lets a card start from the app in front (or a button's intent): from the
         // background it says no, so not every new topic tries again.
         if often {
-            guard Date().timeIntervalSince(lastRestore) > 60 else { return }
+            // Not at all from the background: iOS says no, and trying would only take away the
+            // ended card still on the Lock Screen. The next time WTF comes forward does it.
+            guard UIApplication.shared.applicationState != .background,
+                  Date().timeIntervalSince(lastRestore) > 60 else { return }
             lastRestore = Date()
         }
         state.since = AppModel.shared.listeningSince ?? state.since
@@ -63,15 +83,17 @@ final class ListeningActivity {
 
     private var lastRestore = Date.distantPast
 
-    private func request() {
+    @discardableResult
+    private func request() -> Bool {
         activity = nil
         // Any left from before (WTF closed while it was listening, or one iOS ended) would show
-        // as a second pill.
-        for old in Activity<ListeningAttributes>.activities {
-            Task { await old.end(nil, dismissalPolicy: .immediate) }
-        }
+        // as a second pill. Ended only once there's a new one: if iOS says no, they stay.
+        let olds = Activity<ListeningAttributes>.activities
         do {
             activity = try Activity.request(attributes: ListeningAttributes(), content: ActivityContent(state: state, staleDate: Self.fresh))
+            for old in olds {
+                Task { await old.end(nil, dismissalPolicy: .immediate) }
+            }
             heartbeat?.cancel()
             heartbeat = Task { [weak self] in
                 while !Task.isCancelled {
@@ -80,8 +102,10 @@ final class ListeningActivity {
                     await current.update(ActivityContent(state: self.state, staleDate: Self.fresh))
                 }
             }
+            return true
         } catch {
             Log.error("Lock Screen card didn't start", error)
+            return false
         }
     }
 

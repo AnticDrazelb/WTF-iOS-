@@ -72,9 +72,11 @@ public enum WhenParser {
         var q = phrase.lowercased()
         q = Rx(#"(\d)(st|nd|rd|th)\b"#).replace(q, with: "$1")
         q = q.replacingOccurrences(of: "a.m.", with: "am").replacingOccurrences(of: "p.m.", with: "pm").replacingOccurrences(of: "o'clock", with: "")
+        // "8pm" has no word break between the 8 and the pm: part them so the pm is heard.
+        q = Rx(#"(\d)(am|pm)\b"#).replace(q, with: "$1 $2")
         // "7.30" is how a time's often written here: keep it a time before full stops go (not
-        // "£3.50", "45.30" or the date "15.10.26").
-        q = Rx(#"(?<![£$€\d.])\b([01]?\d|2[0-3])\.([0-5]\d)(?!\.?\d)"#).replace(q, with: "$1:$2")
+        // "£3.50", "45.30", the date "15.10.26" or "it cost 2.50").
+        q = Rx(#"(?<![£$€\d.])(?<!\bcost |\bcosts |\bcosting |\bpaid |\bprice )\b([01]?\d|2[0-3])\.([0-5]\d)(?!\.?\d)"#).replace(q, with: "$1:$2")
         q = " " + Rx(#"[,.!?]"#).replace(q, with: " ") + " "
         let today = Day(y: reference.year!, m: reference.month!, d: reference.day!)
         guard var date = parseDate(q, today: today) else { return nil }
@@ -103,8 +105,11 @@ public enum WhenParser {
     static let explicitDate: Rx = {
         let monthNames = "january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec"
         let ords = ordinals.map(\.0).joined(separator: "|")
-        return Rx(#"\bthe\s+(\d{1,2}|(twenty[ -])?("# + ords + #"))\b|\b\d{1,2}\s+(of\s+)?("# + monthNames + #")\b|\b("# + monthNames + #")\s+\d{1,2}\b|\b\d{1,2}/\d{1,2}\b"#)
+        return Rx(#"\bthe\s+(\d{1,2}"# + notACount + #"|(twenty[ -])?("# + ords + #"))\b|\b\d{1,2}\s+(of\s+)?("# + monthNames + #")\b(?!\s+be\b)|\b("# + monthNames + #")\s+\d{1,2}\b|\b\d{1,2}/\d{1,2}\b"#)
     }()
+
+    /// "the 4 of us", "the 2 kids": a count, not the 4th or the 2nd.
+    static let notACount = #"\b(?!\s+(?:of\s+(?:us|you|them|those|these|our|my|your|their)|people|kids|children|minutes|mins|hours|times|days|weeks|months|years)\b)"#
 
     static func ordinal(_ n: Int) -> String {
         let suffix = (11...13).contains(n % 100) ? "th" : [1: "st", 2: "nd", 3: "rd"][n % 10] ?? "th"
@@ -126,8 +131,8 @@ public enum WhenParser {
         if Rx(#"\b(tomorrow|tmrw)\b"#).test(q) { return today.plus(days: 1) }
         if Rx(#"\b(today|tonight|this (morning|afternoon|evening))\b"#).test(q) { return today }
 
-        // "24 October", "October 24", "24/10"
-        for m in Rx(#"\b(\d{1,2})\s+(?:of\s+)?([a-z]+)\b"#).all(q) {
+        // "24 October", "October 24", "24/10" (not "at 10 may be later")
+        for m in Rx(#"\b(\d{1,2})\s+(?:of\s+)?([a-z]+)\b(?!\s+be\b)"#).all(q) {
             if let month = months[m[2]] { return nextDate(today, month: month, day: Int(m[1])!) }
         }
         for m in Rx(#"\b([a-z]+)\s+(\d{1,2})\b"#).all(q) {
@@ -137,9 +142,10 @@ public enum WhenParser {
             return nextDate(today, month: month, day: Int(m[1])!) // UK order
         }
 
-        // Weekdays: "Thursday" = the next one; "next Thursday" = the one in the following week.
+        // Weekdays: "Thursday" = the next one; "next Thursday" = the one in the following week;
+        // "this Friday" said on a Friday is today.
         if let m = Rx(#"\b(next|this|on)?\s*(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"#).first(q) {
-            var d = today.next(days[m[2]]!)
+            var d = today.next(days[m[2]]!, orSame: m[1] == "this")
             if m[1] == "next" && d < today.next(2) { d = d.plus(days: 7) }
             return d
         }
@@ -147,7 +153,7 @@ public enum WhenParser {
         if Rx(#"\bnext week\b"#).test(q) { return today.next(2) }
 
         // "the 24th" / "on the twentieth": this month, or next if it's passed.
-        var dayOfMonth: Int? = Rx(#"\bthe\s+(\d{1,2})\b"#).first(q).flatMap { Int($0[1]) }
+        var dayOfMonth: Int? = Rx(#"\bthe\s+(\d{1,2})"# + notACount).first(q).flatMap { Int($0[1]) }
         if dayOfMonth == nil {
             for (w, n) in ordinals where Rx(#"\bthe\s+(twenty |twenty-)?"# + w + #"\b"#).test(q) {
                 dayOfMonth = Rx("twenty[ -]" + w).test(q) ? 20 + n : n
@@ -190,16 +196,32 @@ public enum WhenParser {
             if (1...7).contains(h) { return h + 12 } // "at 3" almost always means 3pm
             return h
         }
+        // A suffix said right after the number wins over guesses from the rest of the phrase.
+        func clock(_ h: Int, _ suffix: String) -> Int {
+            switch suffix {
+            case "pm": return h < 12 ? h + 12 : h
+            case "am": return h == 12 ? 0 : h
+            default: return adjust(h) % 24
+            }
+        }
         if Rx(#"\b(noon|midday|lunchtime)\b"#).test(q) { return (12, 0) }
         // "Friday at midnight" means the end of Friday, not the start of it (Thursday night).
         if Rx(#"\bmidnight\b"#).test(q) { return (23, 59) }
         if let m = Rx(#"\b(\d{1,2})[:.](\d{2})\s*(am|pm)?\b"#).first(q) {
-            return (adjust(Int(m[1])!) % 24, min(max(Int(m[2])!, 0), 59))
+            return (clock(Int(m[1])!, m[3]), min(max(Int(m[2])!, 0), 59))
         }
         if let m = Rx(#"\bhalf (past )?"# + num + #"\b"#).first(q) { return (adjust(n(m[2])) % 24, 30) }
         if let m = Rx(#"\bquarter past "# + num + #"\b"#).first(q) { return (adjust(n(m[1])) % 24, 15) }
         if let m = Rx(#"\bquarter to "# + num + #"\b"#).first(q) { return ((adjust(n(m[1])) + 23) % 24, 45) }
-        if let m = Rx(#"\b"# + num + #"\s*(am|pm)\b"#).first(q), (1...12).contains(n(m[1])) { return (adjust(n(m[1])) % 24, 0) }
+        // "ten to four", "twenty past three"; not the range "from 10 to 4" or "5 to 10 minutes".
+        let minutes = ["five": 5, "ten": 10, "twenty": 20, "twenty-five": 25, "twenty five": 25]
+        if let m = Rx(#"(?<!\bfrom )\b(twenty[- ]five|twenty|ten|five|5|10|20|25)\s+(?:minutes\s+)?(past|to)\s+"# + num +
+                      #"\b(?!\s*(?:minutes|mins|hours|people)\b)"#).first(q), (1...12).contains(n(m[3])) {
+            let mins = Int(m[1]) ?? minutes[m[1]]!
+            let h = adjust(n(m[3]))
+            return m[2] == "past" ? (h % 24, mins) : ((h + 23) % 24, 60 - mins)
+        }
+        if let m = Rx(#"\b"# + num + #"\s*(am|pm)\b"#).first(q), (1...12).contains(n(m[1])) { return (clock(n(m[1]), m[2]), 0) }
         if let m = Rx(#"\b(?:at|for|from|by)\s+"# + num + #"\b(?!\s*(?:st|nd|rd|th|minutes|mins|people|of))"#).first(q) {
             let h = n(m[1])
             if (1...12).contains(h) { return (adjust(h) % 24, 0) }

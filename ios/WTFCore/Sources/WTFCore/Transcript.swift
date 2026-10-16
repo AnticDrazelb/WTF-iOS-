@@ -117,37 +117,55 @@ public enum ListAnswers {
         }
     }
 
-    /// Not "pick up" or "the shops" alone: "When do I pick up Ezra?", "What time do the shops shut?"
-    static let shopping = Rx(#"\b(buy|shopping|groceries|supermarket|(pick up|get) (from|at) the (shop|shops|supermarket)|need from the shops?)\b"#)
+    /// Not "pick up" or "the shops" alone: "When do I pick up Ezra?", "What time do the shops shut?";
+    /// nor any "buy": "What should I buy Mum?" is about a present, not the list.
+    static let shopping = Rx(#"\b((need|needs|have|got|left|anything|things|stuff) to buy|shopping|groceries|supermarket|(pick up|get) (from|at) the (shop|shops|supermarket)|need from the shops?)\b"#)
     static let events = Rx(#"\b(appointments?|calendar|meetings?|what'?s on|plans|schedule|diary|booked)\b"#)
     static let todos = Rx(#"\b(to-?dos?|tasks|need to do|have to do|promised|promise)\b"#)
+    static let allLists = Rx(#"\bmy lists?\b|\bon (my|the) lists?\b"#)
+    /// Something for someone in particular ("promised Tom", "buy Mum"): the list doesn't say who.
+    static let forSomeone = Rx(#"\b(promised?|buy|get)\s+(?!I\b)[A-Z][a-z]+"#, caseSensitive: true)
 
     /// [calendar]: its time zone and locale, so times read as the person's own (12- or 24-hour).
     public static func answer(_ question: String, open: [Item], now: Date = Date(), calendar: Calendar = .current) -> String? {
         let q = question.lowercased()
         // Only clear list questions; anything about the past goes to the AI.
-        if Rx(#"\b(was|were|said|saying|earlier|yesterday|did|tell|told|decide|decided|happen|happened|who|why|talk|talked|discuss|discussed|mention|mentioned)\b"#).test(q) { return nil }
+        if Rx(#"\b(was|were|said|saying|earlier|yesterday|did|tell|told|decide|decided|happen|happened|who|why|talk|talked|discuss|discussed|mention|mentioned|should)\b"#).test(q) { return nil }
+        if forSomeone.test(question) { return nil }
         func list(_ items: [Item], _ empty: String, _ header: String) -> String {
             items.isEmpty ? empty : header + "\n" + items.map { "\u{2022} \($0.title)" }.joined(separator: "\n")
         }
-        // "When…", "What time…": about a plan, not the list.
-        if shopping.test(q), !Rx(#"\b(when|what time)\b"#).test(q) { return list(open.filter { $0.type == .buy }, "Nothing to buy on your list.", "To buy:") }
-        if todos.test(q) { return list(open.filter { $0.type == .todo }, "Nothing on your to-do list.", "Still to do:") }
-        if events.test(q) {
-            let upcoming = open.filter { $0.type == .event && ($0.start ?? .distantFuture) >= now.addingTimeInterval(-3600) }
-                .sorted { ($0.start ?? .distantFuture) < ($1.start ?? .distantFuture) }
-            if upcoming.isEmpty { return "I haven't heard about any upcoming appointments." }
-            func formatter(_ template: String) -> DateFormatter {
-                let f = DateFormatter()
-                f.calendar = calendar; f.timeZone = calendar.timeZone; f.locale = calendar.locale ?? .current
-                f.setLocalizedDateFormatFromTemplate(template)
-                return f
-            }
+        func formatter(_ template: String) -> DateFormatter {
+            let f = DateFormatter()
+            f.calendar = calendar; f.timeZone = calendar.timeZone; f.locale = calendar.locale ?? .current
+            f.setLocalizedDateFormatFromTemplate(template)
+            return f
+        }
+        // "What's on today?", "Any meetings tomorrow?": just that day.
+        let day: Date? = Rx(#"\b(today|tonight)\b"#).test(q) ? now
+            : Rx(#"\btomorrow\b"#).test(q) ? calendar.date(byAdding: .day, value: 1, to: now) : nil
+        let upcoming = open.filter { $0.type == .event && ($0.start ?? .distantFuture) >= now.addingTimeInterval(-3600) }
+            .filter { e in day.map { d in e.start.map { calendar.isDate($0, inSameDayAs: d) } ?? false } ?? true }
+            .sorted { ($0.start ?? .distantFuture) < ($1.start ?? .distantFuture) }
+        func coming(_ empty: String) -> String {
+            if upcoming.isEmpty { return empty }
             let f = formatter("EEEdMMMjmm"), d = formatter("EEEdMMM")
             return "Coming up:\n" + upcoming.map { e in
                 "\u{2022} \(e.title): " + (e.start.map { e.allDay ? d.string(from: $0) : f.string(from: $0) } ?? "date not clear") + (e.place.map { " (\($0))" } ?? "")
             }.joined(separator: "\n")
         }
+        let when = day == nil ? "upcoming appointments" : Rx(#"\btomorrow\b"#).test(q) ? "appointments tomorrow" : "appointments today"
+        // "When…", "What time…": about a plan, not the list.
+        if shopping.test(q), !Rx(#"\b(when|what time)\b"#).test(q) { return list(open.filter { $0.type == .buy }, "Nothing to buy on your list.", "To buy:") }
+        if todos.test(q) { return list(open.filter { $0.type == .todo }, "Nothing on your to-do list.", "Still to do:") }
+        // "What's on my list?": everything on it, not just the appointments.
+        if allLists.test(q) {
+            let buy = open.filter { $0.type == .buy }, todo = open.filter { $0.type == .todo }
+            let parts = [buy.isEmpty ? nil : list(buy, "", "To buy:"), todo.isEmpty ? nil : list(todo, "", "Still to do:"),
+                         upcoming.isEmpty ? nil : coming("")].compactMap { $0 }
+            return parts.isEmpty ? "Nothing on your lists." : parts.joined(separator: "\n\n")
+        }
+        if events.test(q) { return coming("I haven't heard about any \(when).") }
         return nil
     }
 }

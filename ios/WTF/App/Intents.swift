@@ -184,6 +184,6 @@ struct WTFShortcuts: AppShortcutsProvider {
         AppShortcut(intent: StopListeningIntent(), phrases: ["Stop \(.applicationName)", "Stop \(.applicationName) listening"],
                     shortTitle: "Stop Listening", systemImageName: "stop.fill")
         AppShortcut(intent: ToggleListeningIntent(), phrases: ["Toggle \(.applicationName) listening"],
-                    shortTitle: "Listening On or Off", systemImageName: "waveform.circle")
+                    shortTitle: "Start or Stop Listening", systemImageName: "waveform")
     }
 }

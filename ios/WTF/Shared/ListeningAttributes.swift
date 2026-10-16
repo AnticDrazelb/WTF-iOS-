@@ -26,6 +26,9 @@ struct ListeningAttributes: ActivityAttributes {
         /// The answer to the last press of the card's buttons, shown on it for a while: they've
         /// nowhere else to show it.
         var answer: String?
+        /// Listening's on but the microphone isn't running (a call or Siri has it): the card
+        /// mustn't say it's listening.
+        var paused = false
     }
 }
 
@@ -40,5 +43,6 @@ extension ListeningAttributes.ContentState {
         heard = try c.decodeIfPresent(Bool.self, forKey: .heard) ?? false
         earlier = try c.decodeIfPresent(Bool.self, forKey: .earlier) ?? false
         answer = try c.decodeIfPresent(String.self, forKey: .answer)
+        paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? false
     }
 }

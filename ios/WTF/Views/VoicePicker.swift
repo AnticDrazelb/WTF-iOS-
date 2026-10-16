@@ -5,7 +5,9 @@ import SwiftUI
 struct VoicePicker: View {
     @AppStorage(ReadAloud.voiceKey) private var chosen = ""
     @AppStorage(ReadAloud.speedKey) private var speed = 1.0
-    private let voices = ReadAloud.englishVoices
+    /// Read again when iOS adds or removes one, or on coming back: the footer sends you off to download them.
+    @State private var voices = ReadAloud.englishVoices
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         List {
@@ -31,6 +33,13 @@ struct VoicePicker: View {
         }
         .navigationTitle("Read-Aloud Voice")
         .navigationBarTitleDisplayMode(.inline)
+        // Waited for here, not where it's posted (maybe off the main thread), so the list changes safely.
+        .task {
+            for await _ in NotificationCenter.default.notifications(named: AVSpeechSynthesizer.availableVoicesDidChangeNotification) {
+                voices = ReadAloud.englishVoices
+            }
+        }
+        .onChange(of: scenePhase) { if scenePhase == .active { voices = ReadAloud.englishVoices } }
     }
 
     private func row(name: String, detail: String, id: String) -> some View {

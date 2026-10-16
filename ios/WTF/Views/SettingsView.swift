@@ -1,3 +1,4 @@
+import Network
 import SwiftData
 import SwiftUI
 import UIKit
@@ -10,6 +11,9 @@ struct SettingsView: View {
     @AppStorage("keepDays") private var keepDays = 7
     @State private var speechReady: Bool?
     @State private var speechProblem: String?
+    /// The language it transcribes in, by name, and the iPhone's own when that's a different one.
+    @State private var speechLanguage: String?
+    @State private var phoneLanguage: String?
     @State private var downloading = false
     @State private var confirmWipe = false
     @AppStorage("voices") private var voicesOn = true
@@ -26,6 +30,11 @@ struct SettingsView: View {
     @AppStorage("parakeetDownloaded") private var betterDownloaded = false
     /// Why the Better Accuracy download didn't finish, so the row says more than "Try Again".
     @State private var betterProblem: String?
+    /// Better Accuracy turned on over mobile data: the 440 MB is asked about first.
+    @State private var confirmMobileData = false
+    /// The Better Accuracy download under way. One started after a cancel has a newer one, so the
+    /// old one's ending doesn't clear the new one's bar or show its error.
+    @MainActor private static var betterRun: UUID?
     /// A shorter Keep Transcripts, waiting to be confirmed: it deletes conversations for good.
     @State private var pendingDays: Int?
     /// Read so the Read-Aloud Voice row changes when one's picked.
@@ -75,12 +84,16 @@ struct SettingsView: View {
                     LabeledContent("Speech Recognition") {
                         // A first start downloads it too: not offered twice meanwhile.
                         if downloading || (model.isStarting && speechReady != true) { ProgressView() }
-                        else if speechReady == true { Text("Ready").foregroundStyle(.green) }
+                        else if speechReady == true { Text("Ready").foregroundStyle(.secondary) }
                         else if speechReady == false { Button("Download") { download() } }
                         else { ProgressView() }
                     }
+                    if let speechLanguage { LabeledContent("Language", value: speechLanguage) }
+                    if let phoneLanguage, let speechLanguage {
+                        Text("Your iPhone\u{2019}s language is \(phoneLanguage), but WTF transcribes in \(speechLanguage), so speech in other languages comes out garbled.").font(.footnote).foregroundStyle(.secondary)
+                    }
                     LabeledContent("Apple Intelligence") {
-                        Text(Brain.notReadyReason == nil ? "Ready" : "Not available").foregroundStyle(Brain.notReadyReason == nil ? .green : .orange)
+                        Text(Brain.notReadyReason == nil ? "Ready" : "Not available").foregroundStyle(.secondary)
                     }
                     if SpeechEngine.usesDictation {
                         Text("This iPhone can\u{2019}t run Apple\u{2019}s newer speech model, so WTF uses the dictation one (the keyboard\u{2019}s microphone). It\u{2019}s a little less accurate on long conversations.").font(.footnote).foregroundStyle(.secondary)
@@ -96,13 +109,23 @@ struct SettingsView: View {
                             if on && !Parakeet.suitable { return }
                             setBetter(on)
                         })).tint(.green)
+                        .confirmationDialog("Download 440 MB using mobile data?", isPresented: $confirmMobileData, titleVisibility: .visible) {
+                            Button("Download") { downloadBetter(overMobileData: true) }
+                            Button("Cancel", role: .cancel) {}
+                        } message: {
+                            Text("It\u{2019}s best on Wi-Fi.")
+                        }
                         if betterOn && Parakeet.suitable {
                             LabeledContent("Parakeet Model") {
                                 if let progress = model.betterProgress { betterDownloading(progress) }
-                                else if betterDownloaded { Text("Ready").foregroundStyle(.green) }
+                                else if betterDownloaded { Text("Ready").foregroundStyle(.secondary) }
                                 else { Button(betterProblem == nil ? "Download (440 MB)" : "Try Again") { downloadBetter() } }
                             }
                             if let betterProblem { Text(betterProblem).font(.footnote).foregroundStyle(.secondary) }
+                            // Listening keeps WTF running in the background; otherwise iOS soon stops it.
+                            if model.betterProgress != nil && !model.recording {
+                                Text("Keep WTF open until it\u{2019}s done: iOS stops the download soon after you leave.").font(.footnote).foregroundStyle(.secondary)
+                            }
                         }
                     } header: {
                         Text("Transcription")
@@ -120,7 +143,7 @@ struct SettingsView: View {
                     if voicesOn {
                         LabeledContent("Voice Models") {
                             if voicesLoading { ProgressView() }
-                            else if voicesDownloaded { Text("Ready").foregroundStyle(.green) }
+                            else if voicesDownloaded { Text("Ready").foregroundStyle(.secondary) }
                             else { Button(voicesFailed ? "Try Again" : "Download (22 MB)") { downloadVoices() } }
                         }
                     }
@@ -155,7 +178,8 @@ struct SettingsView: View {
 
                 Section {
                     Toggle("Use AirPods Microphone", isOn: $airPodsMic).tint(.green)
-                        .onChange(of: airPodsMic) { Recorder.shared.microphoneChanged() }
+                        // Off the main thread: the audio route can take a moment to change over.
+                        .onChange(of: airPodsMic) { Task.detached(priority: .userInitiated) { Recorder.shared.microphoneChanged() } }
                 } header: {
                     Text("Microphone")
                 } footer: {
@@ -209,6 +233,7 @@ struct SettingsView: View {
 
                 Section {
                     Link("Privacy Policy", destination: Self.privacyPolicy)
+                    NavigationLink("Acknowledgements", value: "licences")
                     Button("Delete All Data\u{2026}", role: .destructive) { confirmWipe = true }
                 } footer: {
                     Text("Everything stays on this iPhone. Speech is transcribed and summarised on the device; nothing is uploaded.")
@@ -223,11 +248,15 @@ struct SettingsView: View {
                 case "button": ActionButtonSetupView()
                 case "ways": MoreWaysView()
                 case "fixes": FixesView()
+                case "licences": AcknowledgementsView()
                 default: DiagnosticsView()
                 }
             }
             .task {
+                // Watched from now, so turning Better Accuracy on knows if it's on mobile data.
+                MobileData.shared.watch()
                 speechReady = await SpeechEngine.shared.isReady()
+                await loadLanguage()
                 // Access taken away in iOS Settings: the switch says so.
                 if useContacts && !PersonalWords.contactsAllowed { useContacts = false }
                 if useCalendar && !PersonalWords.calendarAllowed { useCalendar = false }
@@ -320,6 +349,7 @@ struct SettingsView: View {
         if on {
             if !betterDownloaded { downloadBetter() }
         } else {
+            Self.betterRun = nil
             model.betterProgress = nil
             Task {
                 await Parakeet.shared.remove()
@@ -328,7 +358,7 @@ struct SettingsView: View {
         }
     }
 
-    private func downloadBetter() {
+    private func downloadBetter(overMobileData: Bool = false) {
         betterProblem = nil
         // Not started when it can't fit: it would fill the iPhone and fail near the end.
         let home = URL(fileURLWithPath: NSHomeDirectory())
@@ -337,20 +367,34 @@ struct SettingsView: View {
             betterProblem = Self.noSpace
             return
         }
+        // 440 MB of a data plan isn't spent without asking. Cancel leaves the switch on, with Download.
+        if !overMobileData && MobileData.shared.inUse {
+            confirmMobileData = true
+            return
+        }
         // Kept on the model, so the bar survives the page being rebuilt.
         let model = self.model
+        let run = UUID()
+        Self.betterRun = run
         model.betterProgress = 0
+        // Not listening, WTF is suspended soon after it's left, cutting the download off: a little
+        // more time is asked for.
+        let time = BackgroundTime("Better Accuracy download")
         Task {
+            defer { time.end() }
             do {
                 try await Parakeet.shared.prepare { fraction in
-                    Task { @MainActor in if model.betterProgress != nil { model.betterProgress = fraction } }
+                    Task { @MainActor in if Self.betterRun == run, model.betterProgress != nil { model.betterProgress = fraction } }
                 }
                 // Only needed when a conversation ends: not held in memory meanwhile.
                 await Parakeet.shared.unload()
             } catch {
-                // Switched off meanwhile: nothing to explain.
-                if betterOn { betterProblem = Self.why(error) }
+                // Switched off (or started again) meanwhile: nothing to explain.
+                if Self.betterRun == run, betterOn { betterProblem = Self.why(error) }
             }
+            // A newer download, or none (switched off, which deletes it): that's in charge now.
+            guard Self.betterRun == run else { return }
+            Self.betterRun = nil
             betterDownloaded = Parakeet.downloaded
             model.betterProgress = nil
             // Switched off while it was downloading: it doesn't stay.
@@ -392,19 +436,142 @@ struct SettingsView: View {
         downloading = true
         Task {
             speechProblem = nil
-            do {
-                try await SpeechEngine.shared.prepare()
-            } catch {
-                Log.error("Speech model download", error)
+            // A stalled download is given up on (it carries on in the system, for the next try),
+            // so the row isn't left spinning with no way to try again.
+            let fetched: Bool? = await withDeadline(180) { () -> Bool? in
+                // A task of its own, so giving up on it doesn't cancel the download too.
+                let fetch = Task { try await SpeechEngine.shared.prepare() }
+                do {
+                    try await fetch.value
+                    return true
+                } catch {
+                    Log.error("Speech model download", error)
+                    return false
+                }
+            }
+            if fetched == nil {
+                speechProblem = "Still downloading. Check Wi-Fi, then try again."
+            } else if fetched == false {
                 speechProblem = "The download didn\u{2019}t finish. Check Wi-Fi and free space, then try again."
             }
             speechReady = await SpeechEngine.shared.isReady()
-            if speechReady == false && speechProblem == nil {
-                let language = await SpeechEngine.shared.language()
-                speechProblem = "iOS didn't install the speech model for \(language). Check Wi-Fi and free space (Settings › General › iPhone Storage), then try again."
+            if speechReady == true {
+                speechProblem = nil
+            } else if speechProblem == nil {
+                await loadLanguage()
+                speechProblem = "iOS didn\u{2019}t install the speech model for \(speechLanguage ?? "this language"). Check Wi-Fi and free space (Settings › General › iPhone Storage), then try again."
             }
             downloading = false
         }
+    }
+
+    /// The language it transcribes in, by name ("English (United Kingdom)"), and the iPhone's own
+    /// when that's a different one: speech in any other language comes out as nonsense.
+    private func loadLanguage() async {
+        let id = await SpeechEngine.shared.language()
+        speechLanguage = Locale.current.localizedString(forIdentifier: id) ?? id
+        let phone = Locale(identifier: Locale.preferredLanguages.first ?? id).language.languageCode
+        if let phone, phone != Locale(identifier: id).language.languageCode {
+            phoneLanguage = Locale.current.localizedString(forLanguageCode: phone.identifier) ?? phone.identifier
+        } else {
+            phoneLanguage = nil
+        }
+    }
+}
+
+/// Whether the connection's mobile data (or a hotspot), watched from when Settings first opens.
+private final class MobileData: @unchecked Sendable {
+    static let shared = MobileData()
+    private let monitor = NWPathMonitor()
+    private let lock = NSLock()
+    private var started = false
+    private var expensive = false
+
+    func watch() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !started else { return }
+        started = true
+        monitor.pathUpdateHandler = { [weak self] path in
+            guard let self else { return }
+            self.lock.lock()
+            self.expensive = path.isExpensive
+            self.lock.unlock()
+        }
+        monitor.start(queue: DispatchQueue(label: "wtf.mobiledata"))
+    }
+
+    var inUse: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return expensive
+    }
+}
+
+/// A little more time to finish something once WTF's left (iOS gives about 30 seconds).
+@MainActor
+private final class BackgroundTime {
+    private var task = UIBackgroundTaskIdentifier.invalid
+
+    init(_ name: String) {
+        task = UIApplication.shared.beginBackgroundTask(withName: name) { [weak self] in
+            // Out of time: let go, or iOS closes WTF.
+            MainActor.assumeIsolated { self?.end() }
+        }
+    }
+
+    func end() {
+        guard task != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(task)
+        task = .invalid
+    }
+}
+
+/// Settings › Acknowledgements: what WTF is built on, and the licences it's used under.
+struct AcknowledgementsView: View {
+    private struct Credit: Identifiable {
+        let name: String
+        let use: String
+        let licence: String
+        let link: URL
+        var id: String { name }
+    }
+
+    private static let credits = [
+        Credit(name: "FluidAudio", use: "Runs the Better Accuracy and voice models on the Neural Engine. \u{00A9} FluidInference.",
+               licence: "Apache License 2.0", link: URL(string: "https://github.com/FluidInference/FluidAudio")!),
+        Credit(name: "NVIDIA Parakeet TDT 0.6B v2", use: "The Better Accuracy speech model, converted for Core ML by FluidInference.",
+               licence: "CC BY 4.0", link: URL(string: "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2")!),
+        Credit(name: "pyannote segmentation", use: "Finds where each voice speaks, for Tell Voices Apart.",
+               licence: "MIT License", link: URL(string: "https://huggingface.co/pyannote/segmentation-3.0")!),
+        Credit(name: "WeSpeaker ResNet34", use: "Tells one voice from another, for Tell Voices Apart.",
+               licence: "CC BY 4.0", link: URL(string: "https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM")!),
+    ]
+
+    var body: some View {
+        List {
+            ForEach(Self.credits) { c in
+                Section {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(c.name).font(.headline)
+                        Text(c.use).font(.subheadline).foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 2)
+                    LabeledContent("Licence", value: c.licence)
+                    Link("View Source and Licence", destination: c.link)
+                }
+            }
+            Section {
+                Link("Apache License 2.0", destination: URL(string: "https://www.apache.org/licenses/LICENSE-2.0")!)
+                Link("CC BY 4.0", destination: URL(string: "https://creativecommons.org/licenses/by/4.0/")!)
+                Link("MIT License", destination: URL(string: "https://opensource.org/license/mit")!)
+            } header: {
+                Text("Licences")
+            } footer: {
+                Text("The models are used unchanged apart from conversion to Core ML.")
+            }
+        }
+        .navigationTitle("Acknowledgements")
     }
 }
 
@@ -414,6 +581,8 @@ struct PeopleView: View {
     @Query(sort: \Person.name) private var people: [Person]
     @State private var renaming: Person?
     @State private var typed = ""
+    /// Why a name typed in Rename wasn't used, so the alert doesn't just close.
+    @State private var refused: String?
 
     var body: some View {
         List {
@@ -448,12 +617,32 @@ struct PeopleView: View {
         .alert("Rename", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField("Name", text: $typed).textInputAutocapitalization(.words)
             Button("Cancel", role: .cancel) {}
-            Button("Save") {
-                if let p = renaming { Task { await model.pipeline.renamePerson(p.id, to: typed) } }
-            }
+            Button("Save") { save() }
         } message: {
             Text("Their lines in every conversation change too.")
         }
+        .alert(refused ?? "", isPresented: Binding(get: { refused != nil }, set: { if !$0 { refused = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            if refused == Self.unusable { Text("Use a name of up to 30 letters, not a number or \u{201C}\(Labels.me)\u{201D}.") }
+            else { Text("Two people with one name can\u{2019}t be told apart in transcripts again.") }
+        }
+    }
+
+    private static let unusable = "That Name Can\u{2019}t Be Used"
+
+    /// A name someone else already has would merge the two in every transcript, for good: refused.
+    private func save() {
+        guard let p = renaming else { return }
+        guard let name = Labels.cleanName(typed), name != Labels.me else {
+            refused = Self.unusable
+            return
+        }
+        if people.contains(where: { $0.id != p.id && $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+            refused = "Someone\u{2019}s Already Called \(name)"
+            return
+        }
+        Task { await model.pipeline.renamePerson(p.id, to: typed) }
     }
 
     private func row(_ p: Person) -> some View {

@@ -47,6 +47,7 @@ struct YourDayRow: View {
                 Label("Your Day", systemImage: "sun.horizon").font(.headline)
                 Spacer()
                 Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
             }
             Text(recap ?? DayReview.plain(notes, time: clock))
                 .font(.subheadline).foregroundStyle(.secondary)
@@ -100,6 +101,8 @@ struct DayView: View {
     }
 
     var body: some View {
+        // Not ones being deleted: a row left showing one as it goes would crash the app.
+        let conversations = self.conversations.filter { !model.hiding.contains($0.persistentModelID) }
         let notes = conversations.map(\.dayNote)
         let toWrite = written(conversations)
         List {
@@ -111,10 +114,10 @@ struct DayView: View {
             } header: {
                 Text(dayLabel(day))
             }
-            items("Decided", icon: "checkmark.circle", DayReview.gather(notes, limit: 40) { $0.decided })
+            items("Decided", icon: "checkmark.circle", DayReview.gather(notes, limit: 40) { $0.decided }, in: conversations)
             // Not an empty circle: that's Lists' tick box, and these open where they were said.
-            items("To-dos", icon: "arrow.right.circle", DayReview.gather(notes, limit: 40) { $0.todo })
-            items("Left Hanging", icon: "ellipsis.bubble", DayReview.gather(notes, limit: 40) { $0.hanging })
+            items("To-dos", icon: "arrow.right.circle", DayReview.gather(notes, limit: 40) { $0.todo }, in: conversations)
+            items("Left Hanging", icon: "ellipsis.bubble", DayReview.gather(notes, limit: 40) { $0.hanging }, in: conversations)
             if !conversations.isEmpty {
                 Section("Conversations") {
                     ForEach(conversations) { c in
@@ -147,7 +150,7 @@ struct DayView: View {
     }
 
     @ViewBuilder
-    private func items(_ title: String, icon: String, _ found: [(text: String, from: Int)]) -> some View {
+    private func items(_ title: String, icon: String, _ found: [(text: String, from: Int)], in conversations: [Conversation]) -> some View {
         if !found.isEmpty {
             Section(title) {
                 ForEach(Array(found.enumerated()), id: \.offset) { _, item in

@@ -7,16 +7,17 @@ public enum RecallIntent: Equatable, Sendable { case latest, digest, commitments
 /// given only what the question needs. (A short version of the Android app's LocalRecall.)
 public enum Prompts {
     static let commitment = Rx(#"promis|said i'?d|i said i would|to-?do|commit|agreed to|supposed to|\bowe\b|need to do|have to do"#)
-    static let digest = Rx(#"summar|recap|my day|overview|what did i do|what have i (done|been doing)|everything"#)
+    static let digest = Rx(#"summar|recap|my day|overview|what did i do\b(?!\s+(with|about))|what have i (done|been doing)|everything"#)
     /// Not any "just" or "where was I with…": "I just can't remember Tom's address" is a question of its own.
-    static let latest = Rx(#"\b(what|where) (was|were|did) (i|we) just\b|\bjust (now|said|saying)\b|a (minute|moment|sec|second)s? ago|right now|where was i\b(?!\s+with)|lost (my|the) (train|thread)|interrupted|on about|what was i (just )?(saying|talking|on)|where were we|what were we (just )?(saying|talking|on)|remind me what (i|we) (was|were) (saying|talking)|last thing (i|we) said"#)
+    static let latest = Rx(#"\b(what|where) (was|were|did) (i|we|he|she|they) just\b|\b(i|we) (was|were) just (saying|talking|on)\b|\b(this|that|the last|the latest) conversation\b|\bjust (now|said|saying)\b|a (minute|moment|sec|second)s? ago|right now|where was i\b(?!\s+with)|lost (my|the) (train|thread)|interrupted|on about|what was i (just )?(saying|talking|on)|where were we|what were we (just )?(saying|talking|on)|remind me what (i|we) (was|were) (saying|talking)|last thing (i|we) said"#)
     static let timeWords = Rx(#"\b(yesterday|this morning|last night|earlier|today|afternoon|evening|lunch|hours? ago)\b"#)
 
     public static func intent(_ question: String) -> RecallIntent {
         let q = question.lowercased()
         if commitment.test(q) { return .commitments }
-        if digest.test(q) { return .digest }
+        // Before the recap: "summarise what we were just talking about" is about the latest talk, not the day.
         if latest.test(q) && !timeWords.test(q) { return .latest }
+        if digest.test(q) { return .digest }
         return .focused
     }
 

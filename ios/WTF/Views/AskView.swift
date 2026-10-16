@@ -9,6 +9,8 @@ struct AskView: View {
     @State private var input = ""
     @FocusState private var typing: Bool
     @State private var confirmClear = false
+    /// The send button's circle grows with the text size, so its arrow always fits inside it.
+    @ScaledMetric(relativeTo: .subheadline) private var sendSize: CGFloat = 32
     @Query(AskView.latest) private var latest: [Conversation]
 
     static var latest: FetchDescriptor<Conversation> {
@@ -103,12 +105,16 @@ struct AskView: View {
             .safeAreaInset(edge: .top, spacing: 0) {
                 if let trail {
                     ThreadTrail(threads: trail.threads) { model.askAbout($0, in: trail.id) }
+                        // Kept modest at the largest text sizes, so the chat has the room.
+                        .dynamicTypeSize(...DynamicTypeSize.accessibility1)
                         .background(.bar)
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
             }
             .animation(.snappy, value: trail?.threads.count)
             .navigationTitle("Ask")
+            // Inline, as a chat opens at its latest message: a large title would sit as an empty band.
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { ListeningButton() }
                 ToolbarItem(placement: .topBarTrailing) {
@@ -209,10 +215,10 @@ struct AskView: View {
                 Image(systemName: asking ? "stop.fill" : "arrow.up")
                     .font(.subheadline.weight(.bold))
                     .foregroundStyle(Color(.systemBackground))
-                    .frame(width: 32, height: 32)
+                    .frame(width: sendSize, height: sendSize)
                     .background(Circle().fill(canSend || asking ? Color.primary : Color.secondary.opacity(0.35)))
-                    // The full 44 pt to tap, the circle drawn as before.
-                    .frame(width: 44, height: 44)
+                    // At least 44 pt to tap, the circle drawn as before.
+                    .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
             }
             .disabled(!canSend && !asking)

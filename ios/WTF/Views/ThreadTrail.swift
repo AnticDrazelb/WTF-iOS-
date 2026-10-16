@@ -23,10 +23,6 @@ struct ThreadTrail: View {
                 }
                 .padding(.horizontal, 16).padding(.vertical, 8)
             }
-            // Scrolling the trail sideways shouldn't also change tab.
-            .onScrollPhaseChange { _, phase in
-                if phase != .idle { TabSwipe.sidewaysScrollUntil = Date().addingTimeInterval(0.6) }
-            }
             .onAppear { proxy.scrollTo(threads.last?.id, anchor: .trailing) }
             .onChange(of: threads.count) { withAnimation(.snappy) { proxy.scrollTo(threads.last?.id, anchor: .trailing) } }
         }

@@ -42,11 +42,26 @@ struct ActionButtonSetupView: View {
     /// iPhones and on the iPhone 15 and 15 Plus (iPhone15,4 and 15,5), which don't. Anything that
     /// isn't an iPhone (the Simulator) is taken to have one.
     static let hasActionButton: Bool = {
+        guard let phone = iPhone else { return true }
+        return phone.major >= 16
+    }()
+
+    /// The iPhone 14 Pro (iPhone15,2 and 15,3), the 15 (15,4 and 15,5) and later have a Dynamic
+    /// Island, so a listening pill; the iPhone 16e and 17e (iPhone17,5 and 18,5) and older iPhones
+    /// don't, and show only the Lock Screen card. Anything that isn't an iPhone is taken to have one.
+    static let hasDynamicIsland: Bool = {
+        guard let phone = iPhone else { return true }
+        if ["iPhone17,5", "iPhone18,5"].contains(phone.machine) { return false }
+        return phone.major >= 16 || ["iPhone15,2", "iPhone15,3", "iPhone15,4", "iPhone15,5"].contains(phone.machine)
+    }()
+
+    /// The model identifier ("iPhone17,1") and its first number, or nil if this isn't an iPhone.
+    private static let iPhone: (machine: String, major: Int)? = {
         var name = utsname()
         uname(&name)
         let machine = withUnsafeBytes(of: name.machine) { String(decoding: $0.prefix(while: { $0 != 0 }), as: UTF8.self) }
-        guard machine.hasPrefix("iPhone"), let major = Int(machine.dropFirst(6).prefix(while: { $0.isNumber })) else { return true }
-        return major >= 16
+        guard machine.hasPrefix("iPhone"), let major = Int(machine.dropFirst(6).prefix(while: { $0.isNumber })) else { return nil }
+        return (machine, major)
     }()
 
     /// A WTF press since this page opened.
@@ -67,7 +82,11 @@ struct MoreWaysView: View {
     var body: some View {
         List {
             way("arrow.uturn.backward", "Press Again", "Within 20 seconds, for what came before: the topic you left hanging, then the one before.")
-            way("capsule", "The Listening Pill", "Tap it to stop listening. Hold it for buttons: what came before, what you were saying, and stop.")
+            if ActionButtonSetupView.hasDynamicIsland {
+                way("capsule", "The Listening Pill", "Tap it to stop listening. Hold it for buttons: what came before, what you were saying, and stop.")
+            } else {
+                way("iphone", "The Lock Screen Card", "While listening, its buttons give what came before, what you were saying, and stop.")
+            }
             way("list.bullet", "WTF Menu", ActionButtonSetupView.hasActionButton
                 ? "Rather choose each time? In Settings › Action Button, pick WTF Menu instead of What Was I Saying?"
                 : "Rather choose each time? Use WTF Menu for Back Tap instead of What Was I Saying?")

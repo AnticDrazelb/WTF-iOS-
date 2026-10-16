@@ -34,7 +34,7 @@ struct ListeningControl: ControlWidget {
             // A button, not a toggle: the extension can't see whether WTF's listening, so it
             // says what it does rather than looking on or off.
             ControlWidgetButton(action: WTFListeningControlIntent()) {
-                Label("Listening On or Off", systemImage: "waveform")
+                Label("Start or Stop Listening", systemImage: "waveform")
             }
         }
         .displayName("Start or Stop Listening")
@@ -97,8 +97,8 @@ struct CardBody: View {
 
 /// The controls when you hold the listening pill (and on the Lock Screen card): back a step,
 /// what was I saying, stop, as a row of capsules. Each works without opening WTF. Only those
-/// with something to do show: nothing to recap before anything's been heard, nothing to go back
-/// to before there's an earlier topic.
+/// with something to do show: nothing to recap before anything's been heard (or while paused,
+/// when nothing new is), nothing to go back to before there's an earlier topic.
 struct PillControls: View {
     let state: ListeningAttributes.ContentState
 
@@ -107,7 +107,7 @@ struct PillControls: View {
             if state.earlier {
                 CapsuleButton(intent: WTFBeforeControlIntent(), icon: "backward.fill", label: "Before")
             }
-            if state.heard {
+            if state.heard && !state.paused {
                 CapsuleButton(intent: WTFAskControlIntent(), icon: "questionmark.bubble", label: "What was I saying?", prominent: true)
                     .layoutPriority(1)
             }
@@ -141,16 +141,7 @@ struct CapsuleButton<I: AppIntent>: View {
 struct ListeningLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: ListeningAttributes.self) { context in
-            Group {
-                if context.isStale {
-                    // WTF stopped updating it (closed, or crashed): it isn't listening.
-                    Label("Not listening. Open WTF to carry on.", systemImage: "mic.slash")
-                        .font(.headline).foregroundStyle(.white).padding(16)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    LockScreenCard(state: context.state)
-                }
-            }
+            LockScreenCard(state: context.state, stale: context.isStale)
                 .activityBackgroundTint(Look.glass)
                 .activitySystemActionForegroundColor(.white)
                 // Stale, a tap just opens WTF, which carries on listening as it opens: no question,
@@ -160,15 +151,18 @@ struct ListeningLiveActivity: Widget {
             let s = context.state
             // WTF stopped updating it (closed, or crashed): nothing in the pill may say it's listening.
             let stale = context.isStale
+            // Listening's on but the microphone isn't running (a call or Siri has it): no timer.
+            let paused = !stale && s.paused
             return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    Label(stale ? "Not listening" : "Listening", systemImage: stale ? "mic.slash" : "waveform")
+                    Label(stale ? "Not listening" : paused ? "Paused" : "Listening",
+                          systemImage: stale ? "mic.slash" : paused ? "waveform.slash" : "waveform")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.white)
                         .padding(.leading, 4)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    if !stale {
+                    if !stale && !paused {
                         Elapsed(since: s.since, font: .subheadline).frame(width: 60, alignment: .trailing).padding(.trailing, 4)
                     }
                 }
@@ -195,19 +189,20 @@ struct ListeningLiveActivity: Widget {
                     }
                 }
             } compactLeading: {
-                ListeningMark(font: .caption, stale: stale).padding(.leading, 2)
+                ListeningMark(font: .caption, stale: stale, paused: paused).padding(.leading, 2)
             } compactTrailing: {
                 // A fixed width: a running time left to size itself fills the whole island.
-                if stale {
+                if stale || paused {
                     Color.clear.frame(width: 40)
                 } else {
                     Elapsed(since: s.since, font: .caption2, alignment: .center).frame(width: 40)
                 }
             } minimal: {
-                ListeningMark(font: .caption, stale: stale)
+                ListeningMark(font: .caption, stale: stale, paused: paused)
             }
-            // A tap on the pill opens WTF to stop listening; holding it shows the buttons.
-            .widgetURL(URL(string: "wtf://listening"))
+            // A tap on the pill opens WTF to stop listening; holding it shows the buttons. Stale,
+            // as on the card, a tap just opens WTF, which carries on listening: no stop sheet.
+            .widgetURL(stale ? nil : URL(string: "wtf://listening"))
             .keylineTint(.gray)
         }
         .supplementalActivityFamilies([.small])
@@ -215,13 +210,15 @@ struct ListeningLiveActivity: Widget {
 }
 
 /// The waveform from WTF's own Listen button, wherever the card or the pill shows; the crossed-out
-/// microphone once WTF has stopped updating it ([stale]), as on the card.
+/// microphone once WTF has stopped updating it ([stale]), as on the card; the struck-out waveform, as
+/// on the Listen button, while something else has the microphone ([paused]).
 struct ListeningMark: View {
     var font: Font = .subheadline
     var stale = false
+    var paused = false
 
     var body: some View {
-        Image(systemName: stale ? "mic.slash" : "waveform")
+        Image(systemName: stale ? "mic.slash" : paused ? "waveform.slash" : "waveform")
             .font(font.weight(.semibold))
             .foregroundStyle(.white)
     }
@@ -247,29 +244,46 @@ struct Elapsed: View {
 struct LockScreenCard: View {
     @Environment(\.activityFamily) private var family
     let state: ListeningAttributes.ContentState
+    /// WTF stopped updating it (closed, or crashed): it isn't listening.
+    var stale = false
+
+    /// Listening's on but the microphone isn't running: no timer, and it doesn't say listening.
+    private var paused: Bool { !stale && state.paused }
 
     var body: some View {
         if family == .small {
-            // Apple Watch Smart Stack: just the topic and what's hanging.
+            // Apple Watch Smart Stack: just the topic and what's hanging. Stale, just that it isn't
+            // listening: "Open WTF" means nothing on the watch.
             VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 5) { ListeningMark(font: .caption2); Elapsed(since: state.since, font: .caption2, alignment: .leading).frame(width: 44, alignment: .leading) }
-                Text(state.topic ?? "Listening").font(.headline).lineLimit(2)
-                if state.hanging > 0 {
+                HStack(spacing: 5) {
+                    ListeningMark(font: .caption2, stale: stale, paused: paused)
+                    if !stale && !paused {
+                        Elapsed(since: state.since, font: .caption2, alignment: .leading).frame(width: 44, alignment: .leading)
+                    }
+                }
+                Text(stale ? "Not listening" : paused ? "Paused" : (state.topic ?? "Listening")).font(.headline).lineLimit(2)
+                if !stale && state.hanging > 0 {
                     Text("\(state.hanging) left hanging").font(.caption2).foregroundStyle(Look.secondary)
                 }
             }
             .padding(8)
+        } else if stale {
+            Label("Not listening. Open WTF to carry on.", systemImage: "mic.slash")
+                .font(.headline).foregroundStyle(.white).padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             // Kept under iOS's 160 points: heading, then the trail and the buttons, or an answer
             // (which takes the topic's place) and its buttons: 12 + 22 + 8 + 54 + 8 + 34 + 12 at most,
             // with text sizes capped so the largest don't push the buttons off.
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
-                    ListeningMark()
-                    Text(state.answer == nil ? (state.topic ?? "Listening") : "WTF")
+                    ListeningMark(paused: paused)
+                    Text(state.answer != nil ? "WTF" : paused ? "Paused" : (state.topic ?? "Listening"))
                         .font(.headline).foregroundStyle(.white).lineLimit(1)
                     Spacer()
-                    Elapsed(since: state.since, font: .subheadline).frame(width: 72, alignment: .trailing)
+                    if !paused {
+                        Elapsed(since: state.since, font: .subheadline).frame(width: 72, alignment: .trailing)
+                    }
                 }
                 CardBody(state: state)
             }
@@ -279,14 +293,15 @@ struct LockScreenCard: View {
     }
 }
 
-/// Mum's birthday › The MOT › That video: hanging topics glow orange, the current one is bold.
+/// Mum's birthday › The MOT › That video: hanging topics have a dashed outline, the current one is
+/// bold. VoiceOver says which, as it can't see either.
 struct Trail: View {
     let steps: [ListeningAttributes.Step]
 
     var body: some View {
         HStack(spacing: 4) {
             ForEach(Array(steps.enumerated()), id: \.offset) { i, step in
-                if i > 0 { Image(systemName: "chevron.right").font(.caption2).foregroundStyle(Look.secondary) }
+                if i > 0 { Image(systemName: "chevron.right").font(.caption2).foregroundStyle(Look.secondary).accessibilityHidden(true) }
                 Text(step.title)
                     .font(.caption.weight(step.current ? .semibold : .regular))
                     .lineLimit(1)
@@ -294,7 +309,14 @@ struct Trail: View {
                     .background(Capsule().fill(Color.white.opacity(step.current ? 0.18 : 0.08)))
                     .overlay(Capsule().strokeBorder(Color.white.opacity(0.5), style: StrokeStyle(lineWidth: 1, dash: [3, 3])).opacity(step.hanging ? 1 : 0))
                     .foregroundStyle(.white)
+                    .accessibilityLabel(Self.spoken(step))
             }
         }
+    }
+
+    private static func spoken(_ step: ListeningAttributes.Step) -> String {
+        if step.hanging { return "\(step.title), left hanging" }
+        if step.current { return "\(step.title), now" }
+        return step.title
     }
 }

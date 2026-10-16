@@ -65,6 +65,11 @@ final class Conversation {
     /// conversations summarised before this was kept (they were looked for then).
     var extracted: Bool?
 
+    /// How often its summary has failed, and when it last did: kept, so WTF being ended in the
+    /// background doesn't start the count again (see Pipeline.summarise).
+    var summaryAttempts: Int?
+    var summaryTriedAt: Date?
+
     var fixes: [LearnedFix] {
         get { fixData.flatMap { try? JSONDecoder().decode([LearnedFix].self, from: $0) } ?? [] }
         set { fixData = try? JSONEncoder().encode(newValue) }

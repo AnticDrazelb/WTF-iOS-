@@ -54,14 +54,20 @@ actor VoiceEngine {
             return await self.splitNow(url)
         }
         queue = Task { _ = await job.value }
-        return await job.value
+        // Given up on (the pipeline's deadline): told to stop, so later recordings aren't kept waiting.
+        return await withTaskCancellationHandler {
+            await job.value
+        } onCancel: {
+            job.cancel()
+        }
     }
 
     private func splitNow(_ url: URL) async -> Split? {
-        guard Self.enabled, Self.downloaded else { return nil }
+        // Given up on while it waited its turn: skipped rather than run late.
+        guard Self.enabled, Self.downloaded, !Task.isCancelled else { return nil }
         do {
             try await prepare()
-            guard let manager else { return nil }
+            guard let manager, !Task.isCancelled else { return nil }
             let result = try await manager.process(url)
             let turns = result.segments.map {
                 SpeakerAlign.Turn(start: Double($0.startTimeSeconds), end: Double($0.endTimeSeconds), speaker: $0.speakerId)
