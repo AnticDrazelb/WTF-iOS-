@@ -1,4 +1,5 @@
 import AVFoundation
+import UIKit
 import WTFCore
 
 /// Always-on listener. Reads the mic, resamples to 16 kHz mono, and whenever speech is heard
@@ -20,6 +21,8 @@ final class Recorder: @unchecked Sendable {
     var onStopped: (() -> Void)?
     /// A recording thrown away as a cough or a door (its start), so its live words go too.
     var onDiscard: ((Date) -> Void)?
+    /// Recordings can't be saved (the iPhone's full, say): told at most every ten minutes.
+    var onProblem: ((Error) -> Void)?
 
     /// A new one for every start (see freshEngine). Swapped only with [sessionLock] held, and
     /// under [infoLock] too, for [stalled] to read from anywhere.
@@ -64,6 +67,12 @@ final class Recorder: @unchecked Sendable {
     private var liveOffset = 0
     /// Samples written to the recording being made.
     private var chunkSamples = 0
+    /// When a recording last couldn't be made, and when that was last told: not tried again
+    /// every frame meanwhile.
+    private var openFailedAt = Date.distantPast
+    private var openToldAt = Date.distantPast
+    /// Writing to the recording being made has failed (logged once a recording).
+    private var writeFailed = false
 
     private init() {
         let center = NotificationCenter.default
@@ -77,16 +86,17 @@ final class Recorder: @unchecked Sendable {
                 self.onInterrupted?()
                 return
             }
-            // After a phone call: carry on listening.
+            // After a phone call: carry on listening. Off the thread it's told on (often the main
+            // one): restarting can take a second or two.
             self.queue.async { self.closeChunk(cut: false) }
-            self.resume(why: "after an interruption")
+            DispatchQueue.global(qos: .userInitiated).async { self.resume(why: "after an interruption") }
         }
         // iOS restarted its sound system (it's rare): the audio's all made again, and listening carries on.
         center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: nil) { [weak self] _ in
             guard let self, self.running else { return }
             Log.info("iOS restarted its sound system")
             self.queue.async { self.closeChunk(cut: false) }
-            self.resume(why: "after iOS restarted its sound system")
+            DispatchQueue.global(qos: .userInitiated).async { self.resume(why: "after iOS restarted its sound system") }
         }
     }
 
@@ -107,6 +117,11 @@ final class Recorder: @unchecked Sendable {
     func start() throws {
         sessionLock.lock(); defer { sessionLock.unlock() }
         guard !running else { return }
+        // Nothing heard before the last stop goes into the first recording of this session.
+        queue.sync {
+            pending = []; preRoll = []; recent = []; liveBatch = []
+            cutAt = .distantPast; openFailedAt = .distantPast
+        }
         SpeechGate.shared.start()
         do {
             try configureSession()
@@ -202,17 +217,21 @@ final class Recorder: @unchecked Sendable {
         try session.setCategory(.playAndRecord, mode: .default, options: options)
     }
 
-    /// The microphone setting changed: listening carries on through the right one.
+    /// The microphone setting changed: listening carries on through the right one. Not on the
+    /// caller's thread (Settings, the main one): switching to headphones can take a second or two.
     func microphoneChanged() {
         guard running else { return }
-        sessionLock.lock(); callQualityOnly = nil; sessionLock.unlock()
-        resume(why: "on the new microphone setting")
+        DispatchQueue.global(qos: .userInitiated).async {
+            self.sessionLock.lock(); self.callQualityOnly = nil; self.sessionLock.unlock()
+            self.resume(why: "on the new microphone setting")
+        }
     }
 
     func stop() {
         sessionLock.lock(); defer { sessionLock.unlock() }
         guard running else { return }
         setRunning(false)
+        setRetrying(false)
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         queue.sync { closeChunk(cut: false) }
@@ -238,27 +257,50 @@ final class Recorder: @unchecked Sendable {
     private static let delays: [Double] = [0.5, 1, 2, 4, 8, 16]
 
     private func resume(why: String, attempt: Int, mine: Int) {
-        guard running else { return }
+        guard running else { setRetrying(false); return }
         do {
             try restart()
+            setRetrying(false)
             Log.info("Listening resumed \(why)")
             onResumed?()
         } catch {
             Log.error("Couldn't resume listening \(why)", error)
-            guard running else { return }
+            guard running else { setRetrying(false); return }
             if attempt < Self.delays.count {
+                setRetrying(true)
                 // Not on [queue]: stop() waits on it while holding the session lock.
                 DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + Self.delays[attempt]) { [weak self] in
-                    guard let self, self.stalled else { return }
+                    guard let self else { return }
                     self.infoLock.lock(); let newest = self.retries == mine; self.infoLock.unlock()
+                    // A newer resume is trying instead (and keeping WTF running while it does).
                     guard newest else { return }
+                    guard self.stalled else { self.setRetrying(false); return }
                     self.resume(why: why, attempt: attempt + 1, mine: mine)
                 }
-            } else if !Self.busy(error) {
+            } else {
+                setRetrying(false)
                 // Still no microphone half a minute on, and not for a call: stopped, and the user's told.
-                giveUp()
+                if !Self.busy(error) { giveUp() }
+                // A call or Siri still has it: stays paused until the interruption ends or WTF's opened.
             }
-            // A call or Siri still has it: stays paused until the interruption ends or WTF's opened.
+        }
+    }
+
+    /// Between tries to resume, nothing records, so nothing keeps WTF running in the background:
+    /// iOS could suspend it (the phone locked after a call, say) before the next try. So it's
+    /// kept running while it tries, for the half a minute that takes at most.
+    private var _retrying = false
+    private func setRetrying(_ on: Bool) {
+        infoLock.lock()
+        let changed = _retrying != on
+        _retrying = on
+        infoLock.unlock()
+        guard changed else { return }
+        // Whatever's true by the time it runs, so it doesn't matter which of these runs first.
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.infoLock.lock(); let now = self._retrying; self.infoLock.unlock()
+            KeptRunning.shared.hold(now)
         }
     }
 
@@ -405,7 +447,23 @@ final class Recorder: @unchecked Sendable {
             AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 16_000, AVNumberOfChannelsKey: 1,
             AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false, AVLinearPCMIsBigEndianKey: false,
         ]
-        guard let file = try? AVAudioFile(forWriting: url, settings: settings, commonFormat: .pcmFormatFloat32, interleaved: false) else { return }
+        // It failed a moment ago: not tried again every frame of speech meanwhile.
+        guard now.timeIntervalSince(openFailedAt) >= 5 else { return }
+        let file: AVAudioFile
+        do {
+            file = try AVAudioFile(forWriting: url, settings: settings, commonFormat: .pcmFormatFloat32, interleaved: false)
+        } catch {
+            // The iPhone's full, say: nothing's being saved, so the user's told, now and then.
+            openFailedAt = now
+            preRoll.removeAll()
+            if now.timeIntervalSince(openToldAt) > 600 {
+                openToldAt = now
+                Log.error("Couldn't make a recording", error)
+                onProblem?(error)
+            }
+            return
+        }
+        writeFailed = false
         chunkStart = now.addingTimeInterval(-Double(preRoll.count) * 0.03)
         chunkSamples = 0
         for f in preRoll { write(f, to: file) }
@@ -424,7 +482,11 @@ final class Recorder: @unchecked Sendable {
         guard let buffer = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: AVAudioFrameCount(frame.count)) else { return }
         buffer.frameLength = AVAudioFrameCount(frame.count)
         frame.withUnsafeBufferPointer { src in buffer.floatChannelData![0].update(from: src.baseAddress!, count: frame.count) }
-        try? file.write(from: buffer)
+        do { try file.write(from: buffer) } catch {
+            guard !writeFailed else { return }
+            writeFailed = true
+            Log.error("Couldn't write to a recording", error)
+        }
     }
 
     private func closeChunk(cut: Bool, at now: Date = Date()) {
@@ -444,6 +506,25 @@ final class Recorder: @unchecked Sendable {
         }
         if cut { cutAt = now }
         onChunk?(url, chunkStart, end)
+    }
+}
+
+/// Asks iOS to keep WTF running in the background for a while (see Recorder.setRetrying).
+@MainActor
+private final class KeptRunning {
+    static let shared = KeptRunning()
+    private var task: UIBackgroundTaskIdentifier = .invalid
+
+    func hold(_ on: Bool) {
+        if on, task == .invalid {
+            task = UIApplication.shared.beginBackgroundTask(withName: "wtf.resume") {
+                // Out of time: let go, or iOS closes WTF.
+                MainActor.assumeIsolated { KeptRunning.shared.hold(false) }
+            }
+        } else if !on, task != .invalid {
+            UIApplication.shared.endBackgroundTask(task)
+            task = .invalid
+        }
     }
 }
 

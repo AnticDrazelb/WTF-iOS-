@@ -44,6 +44,10 @@ final class LiveTranscriber: @unchecked Sendable {
     private var since: Date?
     /// Recordings the recorder threw away (coughs, doors): words still to come from them are dropped.
     private var dropped: [Date] = []
+    /// Times in a row it's stopped by itself and been started again, and when it last did.
+    private var revivals = 0
+    private var diedAt = Date.distantPast
+    private var reviving = false
 
     private let source = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: rate, channels: 1, interleaved: false)!
 
@@ -54,8 +58,10 @@ final class LiveTranscriber: @unchecked Sendable {
 
     var running: Bool { locked { analyzer != nil } }
 
-    func start() async {
+    /// [reviving]: started again after it stopped by itself (see revive), not by listening starting.
+    func start(reviving: Bool = false) async {
         guard !running, await SpeechEngine.shared.isReady() else { return }
+        if !reviving { locked { revivals = 0 } }
         let transcriber = await SpeechEngine.shared.makeTranscriber(live: true)
         let analyzer = SpeechAnalyzer(modules: [transcriber])
         await SpeechEngine.shared.applyVocabulary(to: analyzer)
@@ -63,13 +69,13 @@ final class LiveTranscriber: @unchecked Sendable {
         let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
         let results = Task { [weak self] in
             do {
-                for try await heard in SpeechEngine.results(of: transcriber) { self?.take(heard) }
+                for try await heard in SpeechEngine.results(of: transcriber) { self?.take(heard, from: analyzer) }
             } catch {
                 Log.error("Live transcription stopped", error)
             }
             // Nothing's listening to it any more: let it go, so recordings go straight to their
-            // files instead of each waiting for words that won't come.
-            await self?.stopIfCurrent(analyzer)
+            // files instead of each waiting for words that won't come; and start it again shortly.
+            if await self?.stopIfCurrent(analyzer) == true { self?.revive() }
         }
         locked {
             self.analyzer = analyzer
@@ -89,15 +95,41 @@ final class LiveTranscriber: @unchecked Sendable {
         Task { [weak self] in
             do { try await analyzer.start(inputSequence: stream) } catch {
                 Log.error("Live transcription couldn't start", error)
-                await self?.stopIfCurrent(analyzer)
+                if await self?.stopIfCurrent(analyzer) == true { self?.revive() }
             }
         }
     }
 
-    /// Stops it, unless it's already been stopped and another started since.
-    private func stopIfCurrent(_ analyzer: SpeechAnalyzer) async {
-        guard locked({ self.analyzer === analyzer }) else { return }
+    /// Stops it, unless it's already been stopped and another started since. Whether it did.
+    @discardableResult
+    private func stopIfCurrent(_ analyzer: SpeechAnalyzer) async -> Bool {
+        guard locked({ self.analyzer === analyzer }) else { return false }
         await stop()
+        return true
+    }
+
+    /// It stopped by itself (the recogniser failed, or iOS restarted its sound system): started
+    /// again in a while if listening's still on, so the rest of the day isn't all transcribed from
+    /// files. Waiting longer each time it happens again, so one that keeps failing doesn't go round
+    /// in circles. Its own task, as the one it's called from has just been cancelled by stop().
+    private func revive() {
+        let wait = locked { () -> Double? in
+            guard !reviving else { return nil }
+            if Date().timeIntervalSince(diedAt) > 3600 { revivals = 0 }
+            diedAt = Date()
+            reviving = true
+            revivals += 1
+            return min(30 * Double(1 << min(revivals - 1, 6)), 1800)
+        }
+        guard let wait else { return }
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(wait))
+            guard let self else { return }
+            self.locked { self.reviving = false }
+            guard Recorder.shared.running, !self.running else { return }
+            Log.info("Starting live transcription again")
+            await self.start(reviving: true)
+        }
     }
 
     /// Something was deleted: the words heard so far go, so nothing deleted is answered from.
@@ -139,7 +171,18 @@ final class LiveTranscriber: @unchecked Sendable {
             return (self.analyzer, self.input, self.results)
         }
         input?.finish()
-        await Log.attempt("Live transcription didn't finish cleanly") { try await analyzer?.finalizeAndFinishThroughEndOfInput() }
+        // With a time limit: a recogniser that won't finish mustn't hold up a stop, and every
+        // start waiting behind it.
+        if let analyzer {
+            let finished = await withDeadline(5) { () -> Bool? in
+                await Log.attempt("Live transcription didn't finish cleanly") { try await analyzer.finalizeAndFinishThroughEndOfInput() }
+                return true
+            }
+            if finished == nil {
+                Log.error("Live transcription didn't finish in time; cancelled")
+                Task { await analyzer.cancelAndFinishNow() }
+            }
+        }
         results?.cancel()
     }
 
@@ -206,9 +249,12 @@ final class LiveTranscriber: @unchecked Sendable {
         return (a.chunk, (Double(a.offset) + Double(sample - a.sample)) / Self.rate)
     }
 
-    private func take(_ result: SpeechEngine.Heard) {
+    /// [analyzer]: the one that heard it. One stopped (or replaced) since has its last words
+    /// dropped, so they aren't put in a new session's recordings.
+    private func take(_ result: SpeechEngine.Heard, from analyzer: SpeechAnalyzer) {
         let timed = result.words
         lock.lock(); defer { lock.unlock() }
+        guard self.analyzer === analyzer else { return }
         let placed = timed.compactMap { w -> TimedWord? in
             guard let p = place(w.start), p.chunk != .distantPast, !dropped.contains(where: { Self.same($0, p.chunk) }) else { return nil }
             return TimedWord(chunk: p.chunk, start: p.at, end: p.at + max(0, w.end - w.start), text: w.text,

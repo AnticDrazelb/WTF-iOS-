@@ -13,9 +13,15 @@ final class Standby {
     private var queued = false
     /// Bumped by forget(): an answer worked out across a delete may be about what was deleted.
     private var generation = 0
+    /// When a press last asked for the answer.
+    private static let lastAskedKey = "standbyLastAsked"
 
     /// New speech has been transcribed: work the answer out again, now or in a little while.
+    /// Only for someone who's asked in the last week: otherwise it's an AI call and a voice made
+    /// every 45 s all day for nothing (a press still works one out).
     func refresh() async {
+        let asked = UserDefaults.standard.object(forKey: Self.lastAskedKey) as? Date ?? .distantPast
+        guard Date().timeIntervalSince(asked) < 7 * 24 * 3600 else { return }
         let wait = 45 - Date().timeIntervalSince(last)
         guard wait <= 0, !working else {
             if !queued {
@@ -42,13 +48,12 @@ final class Standby {
         ready = nil
         generation += 1
         ReadAloud.shared.forget()
-        // The words just heard too: a press straight after would otherwise answer from them.
-        LiveTranscriber.shared.forget()
     }
 
     /// For a press: the kept answer if nothing's been said since; otherwise one worked out now
     /// with a 3.5 s limit on the AI, then the kept one, then the last words said, word for word.
     func answerNow() async -> String {
+        UserDefaults.standard.set(Date(), forKey: Self.lastAskedKey)
         let model = AppModel.shared
         let live = LiveTranscriber.shared.recentText(seconds: 30).trimmingCharacters(in: .whitespacesAndNewlines)
         let latestEnd = await model.pipeline.latestConversation()?.end

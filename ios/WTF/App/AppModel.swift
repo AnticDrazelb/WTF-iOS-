@@ -61,8 +61,22 @@ final class AppModel {
     static let quickQuestion = "WTF was I just on about?"
 
     private init() {
-        container = try! ModelContainer(for: Chunk.self, Conversation.self, ActionItem.self, Person.self, Fact.self)
+        // A store that won't open (no space, damaged, a failed update) would otherwise crash every
+        // launch and every button. Left where it is, as it may well open next time: WTF runs on
+        // a store kept in memory meanwhile, and Ask says so.
+        var storeFailed = false
+        do {
+            container = try ModelContainer(for: Chunk.self, Conversation.self, ActionItem.self, Person.self, Fact.self)
+        } catch {
+            Log.error("Couldn't open the store", error)
+            storeFailed = true
+            container = try! ModelContainer(for: Chunk.self, Conversation.self, ActionItem.self, Person.self, Fact.self,
+                                            configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        }
         pipeline = Pipeline(modelContainer: container)
+        if storeFailed {
+            problem = "WTF couldn\u{2019}t open what it\u{2019}s kept. Free some space or restart the iPhone, then open WTF again."
+        }
         // Everything WTF keeps stays on this iPhone: not in iCloud or computer backups either.
         var support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         var values = URLResourceValues()
@@ -138,7 +152,10 @@ final class AppModel {
                 if !(await startListening()), let problem { startFailed = problem }
             }
         } else {
-            Recorder.shared.stop()
+            // Off the main thread: letting go of the audio session can take a while. A start
+            // straight after waits for it (see switchMicrophoneOn).
+            let stopping = Task.detached(priority: .userInitiated) { Recorder.shared.stop() }
+            self.stopping = stopping
             recording = false
             paused = false
             // A deliberate stop: no note left saying listening stopped by itself.
@@ -148,11 +165,15 @@ final class AppModel {
             UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [AppModel.pausedNotice])
             stops += 1
             let stop = stops
+            // A start under way stops waiting (on the speech model's download, say) and stands down
+            // now, rather than showing "Starting…" until the wait's up.
+            starting?.cancel()
             // The last recording's words are taken from the live transcript before it stops.
             // Pausing ends the conversation: it gets its title and summary now, not in five minutes.
             // Unless listening's started again meanwhile: then the live transcriber and the
             // conversation belong to the new session and are left alone.
             Task {
+                await stopping.value
                 await pipeline.catchUp()
                 guard stop == stops, !recording, starting == nil else { return }
                 await LiveTranscriber.shared.stop()
@@ -181,6 +202,8 @@ final class AppModel {
     @ObservationIgnored private var starting: Task<Bool, Never>?
     /// Counts stops, so a stop's tidying up doesn't run into a listening session started since.
     @ObservationIgnored private var stops = 0
+    /// The last stop's letting go of the microphone, which a start waits for.
+    @ObservationIgnored private var stopping: Task<Void, Never>?
 
     private func startListeningNow(tries: Int) async -> Bool {
         // A stop while this is under way (Settings, Siri, the stop sheet) wins: checked after each wait.
@@ -206,11 +229,24 @@ final class AppModel {
             problem = "Before WTF listens, open it to see how it works."
             return false
         }
+        // iOS can't ask for the microphone from the background (a control, Siri): until it's been
+        // asked in the app, WTF isn't in Settings' Microphone list to point to.
+        let background = UIApplication.shared.applicationState == .background
+        if background, AVAudioApplication.shared.recordPermission == .undetermined {
+            problem = "Open WTF once to let it use the microphone."
+            return false
+        }
         guard await AVPermissions.microphone() else {
             // Not tried again on every opening: the alert this time says where to turn it on.
             UserDefaults.standard.set(false, forKey: "listening")
             problem = "WTF needs the microphone: Settings › Privacy & Security › Microphone."
             return false
+        }
+        // Now it's clear why: WTF says when it stops listening, and what it heard to act on. Asked
+        // here, before any wait for the speech model, not out of nowhere after it; and only with
+        // WTF in front, where iOS can show the question.
+        if !background {
+            _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
         }
         // Stopped while it was starting: stays stopped, with nothing left running.
         func standDown() async -> Bool {
@@ -251,8 +287,6 @@ final class AppModel {
             Task.detached(priority: .utility) { try? await VoiceEngine.shared.prepare() } // failures are logged inside
         }
         heardSomething(await pipeline.conversationCount() > 0)
-        // Now it's clear why: WTF says when it stops listening, and what it heard to act on.
-        _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
         // The Lock Screen card first: iOS only lets an app start the microphone from the Lock
         // Screen or the Action button if its card is showing.
         ListeningActivity.shared.start()
@@ -294,6 +328,8 @@ final class AppModel {
     /// The microphone on, with a few quick tries: from the Lock Screen or the Action button, iOS
     /// can be holding the audio for a moment (its own panel) and say no to the first ask.
     private func switchMicrophoneOn(tries: Int) async throws {
+        // A stop just before lets go of the microphone first, so it can't undo this start.
+        await stopping?.value
         var lastError: Error?
         for attempt in 1...max(1, tries) {
             do {
@@ -321,14 +357,18 @@ final class AppModel {
     /// other (the WTF Menu) can't record from the background, so it comes forward straight away.
     /// With WTF already open it just starts. Without [forward] (a control) it tries where it is.
     func startListeningFromShortcut(forward: ComeForward? = nil, recordingIntent: Bool = false) async -> Bool {
-        // Apple's rule for recording shortcuts: listening started from one needs its Lock Screen
-        // card, and with Live Activities turned off there isn't one.
-        guard ListeningActivity.allowed else {
+        // Already listening: nothing to start, whatever the Live Activities setting.
+        if recording && Recorder.shared.running { return await startListening() }
+        let background = UIApplication.shared.applicationState == .background
+        // Apple's rule for recording shortcuts: listening started from one in the background
+        // needs its Lock Screen card, and with Live Activities turned off there isn't one. With
+        // WTF in front, or able to come forward, it starts there as the Listen button does.
+        if !ListeningActivity.allowed, background, forward == nil {
             problem = "To start listening from here, turn on Live Activities for WTF (Settings \u{203A} Apps \u{203A} WTF). Or open WTF and tap Listen."
             return false
         }
-        if let forward, UIApplication.shared.applicationState == .background, !Recorder.shared.running {
-            if recordingIntent {
+        if let forward, background, !Recorder.shared.running {
+            if recordingIntent && ListeningActivity.allowed {
                 if await startListening(tries: 2) {
                     Log.info("Started listening from a shortcut without opening WTF")
                     return true
@@ -420,6 +460,8 @@ final class AppModel {
         timelinePath = NavigationPath()
         settingsPath = NavigationPath()
         if wasListening { setListening(false) }
+        // A question still being answered would read what's being deleted, and add its answer after.
+        stopAsking()
         messages = []
         ChatLog.save([])
         DayDigests.shared.forget()
@@ -465,7 +507,8 @@ final class AppModel {
         }
         let old = (try? context.fetch(FetchDescriptor<Conversation>(predicate: #Predicate { $0.end < cutoff }))) ?? []
         guard !old.isEmpty else { return }
-        await remove(old, keepFacts: true, onlyIfShown: true)
+        // Days old, so none is the conversation going on, even one left open when WTF was closed.
+        await remove(old, keepFacts: true, onlyIfShown: true, inProgress: false)
         Log.info("\(old.count) conversation\(old.count == 1 ? "" : "s") past keeping went")
     }
 
@@ -484,7 +527,8 @@ final class AppModel {
     /// about them. Safely: off the screens first (and off any page showing one), the pipeline lets
     /// go of them, then they're deleted where the screens' copies are, so none is left pointing at one.
     /// [onlyIfShown]: the Timeline's pages close only if one of them is showing one of these.
-    private func remove(_ conversations: [Conversation], keepFacts: Bool = false, onlyIfShown: Bool = false) async {
+    /// [inProgress]: one still open may be the conversation going on, so what's being recorded goes too.
+    private func remove(_ conversations: [Conversation], keepFacts: Bool = false, onlyIfShown: Bool = false, inProgress: Bool = true) async {
         guard !conversations.isEmpty else { return }
         let context = container.mainContext
         let keys = conversations.map(\.persistentModelID)
@@ -497,7 +541,12 @@ final class AppModel {
         let shown = !known || !onScreen.isDisjoint(with: ids) || days.contains { daysOnScreen.contains(Calendar.current.startOfDay(for: $0)) }
         if !onlyIfShown || shown { timelinePath = NavigationPath() }
         try? await Task.sleep(for: .milliseconds(350))
-        if conversations.contains(where: { !$0.closed }) { await pipeline.cutOff() }
+        let goingOn = inProgress && conversations.contains(where: { !$0.closed })
+        // The answer kept ready for the Action button, and the words just heard, are about the
+        // latest conversation: they go only if that's one of these, not for every old one expiring.
+        let latest = await pipeline.latestConversation()?.id
+        let current = goingOn || latest.map { ids.contains($0) } == true
+        if goingOn { await pipeline.cutOff() }
         for id in ids { await pipeline.forget(id) }
         // Recordings from then still waiting (a retry) would otherwise come back as a new conversation.
         await pipeline.drop(spans: spans)
@@ -516,6 +565,7 @@ final class AppModel {
             }
         }
         try? context.save()
+        if current { Standby.shared.forget() }
         forgetAsked(about: Set(ids))
         backstory = []
         if recording { ListeningActivity.shared.show(await pipeline.latestThreads()) }
@@ -526,8 +576,8 @@ final class AppModel {
 
     /// Ask's questions and answers about these conversations go; and with no conversations left
     /// at all, nothing Ask said can stand, so all of it goes.
+    /// (The Action button's kept answer is the caller's to forget: see remove.)
     func forgetAsked(about ids: Set<UUID>) {
-        Standby.shared.forget()
         // What drew on them goes, and with a question that goes, the answers that followed it.
         var dropping = false
         messages.removeAll { m in
@@ -547,10 +597,11 @@ final class AppModel {
         forgetAsked(about: [])
     }
 
-    /// The question [from] and the answers after it: what they drew on.
+    /// The question [from] and the answers after it: what they drew on. Added to what they were
+    /// tagged with already, as an answer can come to draw on more as it goes (a follow-up's earlier answer).
     private func tag(from id: UUID, about: Set<UUID>) {
         guard !about.isEmpty, let i = messages.firstIndex(where: { $0.id == id }) else { return }
-        for j in i..<messages.count where messages[j].about == nil { messages[j].about = Array(about) }
+        for j in i..<messages.count { messages[j].about = Array(about.union(messages[j].about ?? [])) }
         ChatLog.save(messages)
     }
 
@@ -586,27 +637,37 @@ final class AppModel {
             if Task.isCancelled { return } // Stop
             if !caughtUp {
                 Log.error("Catching up took over 20 s; answering from what's transcribed so far")
-                add(ChatMessage(fromUser: false, text: "The last few seconds are still being transcribed, so this may miss them."))
+                add(ChatMessage(fromUser: false, text: Self.stillTranscribing))
             }
             let intent = Prompts.intent(q)
             let now = Date()
             if focus == nil, intent == .digest, Prompts.isAboutToday(q) {
                 let today = Calendar.current.startOfDay(for: now)
                 let all = (try? container.mainContext.fetch(FetchDescriptor<Conversation>(predicate: #Predicate { $0.start >= today }, sortBy: [SortDescriptor(\.start)]))) ?? []
-                let notes = all.filter { $0.title != nil && $0.title != "" }.map(\.dayNote)
-                if !notes.isEmpty, Brain.notReadyReason != nil {
+                // Read now: one of them may be deleted while the recap's written.
+                let ids = all.map(\.id)
+                let written = all.filter { $0.title != nil && $0.title != "" }.map(\.dayNote)
+                if !written.isEmpty, Brain.notReadyReason != nil {
                     // Without Apple Intelligence: the day as the Timeline's Your Day shows it.
-                    about.formUnion(all.map(\.id))
+                    about.formUnion(ids)
                     drawsOn(about, question: asked.id)
-                    add(ChatMessage(fromUser: false, text: DayReview.plain(notes, time: { $0.formatted(date: .omitted, time: .shortened) })))
+                    add(ChatMessage(fromUser: false, text: DayReview.plain(written, time: { $0.formatted(date: .omitted, time: .shortened) })))
                     return
+                }
+                // The conversation going on (or just ended) has no summary yet: its last words
+                // stand in, so "my day so far" doesn't leave out what was only just said.
+                let notes = all.compactMap { c -> DayNote? in
+                    if let title = c.title, !title.isEmpty { return c.dayNote }
+                    let words = Prompts.tail(c.transcript, budget: 120)
+                    return words.isEmpty ? nil : DayNote(start: c.start, title: "Not summarised yet", points: [words])
                 }
                 if !notes.isEmpty {
                     status = "Thinking\u{2026}"
                     // It can wait behind the Timeline's own recaps, and Apple's AI can stall: given
                     // up on after a while, for the usual answer instead.
                     if let recap = await withDeadline(45, { await DayDigests.shared.recap(for: today, notes: notes) }) {
-                        about.formUnion(all.map(\.id))
+                        if Task.isCancelled { return }
+                        about.formUnion(ids)
                         drawsOn(about, question: asked.id)
                         add(ChatMessage(fromUser: false, text: recap))
                         return
@@ -639,29 +700,46 @@ final class AppModel {
                              hasFallback: quoted != nil)
                 return
             }
+            // A follow-up ("and when is it?") is looked for with the question it follows, and draws
+            // on what that answer did: deleting those conversations deletes it too.
+            let found = await pipeline.notes(for: earlier.map { $0.question + " " + q } ?? q, focus: focus)
+            about.formUnion(found.used)
+            if let earlier { about.formUnion(earlier.about) }
+            drawsOn(about, question: asked.id)
             if let why = Brain.notReadyReason {
-                add(ChatMessage(fromUser: false, text: why))
+                // No AI: the sentences of the best match that mention the question's words, word for word.
+                let quotes = found.best.map { Prompts.sentences(about: q, in: $0.transcript) } ?? []
+                if let best = found.best, !quotes.isEmpty {
+                    add(ChatMessage(fromUser: false, text: "From \(best.label):\n" + quotes.map { "\u{201C}\($0)\u{201D}" }.joined(separator: "\n")))
+                } else {
+                    add(ChatMessage(fromUser: false, text: why))
+                }
                 return
             }
-            let found = await pipeline.notes(for: q, focus: focus)
-            about.formUnion(found.used)
-            drawsOn(about, question: asked.id)
+            let previous = earlier?.text ?? ""
             guard !found.notes.isEmpty else {
                 add(ChatMessage(fromUser: false, text: recording ? "I haven't heard anything yet. Keep talking and I'll keep track." : "I haven't heard anything yet. Turn on listening and I'll keep track."))
                 return
             }
-            await answer(Prompts.focused(question: q, notes: found.notes, best: found.best, now: now, background: found.background, earlier: earlier),
-                         smaller: Prompts.focused(question: q, notes: found.notes, best: found.best, now: now, background: found.background, earlier: earlier, budget: 1_800))
+            await answer(Prompts.focused(question: q, notes: found.notes, best: found.best, now: now, background: found.background, earlier: previous),
+                         smaller: Prompts.focused(question: q, notes: found.notes, best: found.best, now: now, background: found.background, earlier: previous, budget: 1_800))
         }
     }
 
     /// The last question and WTF's answer to it, if it was in the last ten minutes: so a follow-up
-    /// ("and what did she say?") has something to follow on from.
-    private func earlierExchange() -> String {
+    /// ("and what did she say?") has something to follow on from. The answer is the last one
+    /// given (the AI's, after any word-for-word quote), not the note that catching up took long.
+    /// [about]: the conversations they drew on.
+    private func earlierExchange() -> (text: String, question: String, about: Set<UUID>)? {
         guard let q = messages.lastIndex(where: \.fromUser), Date().timeIntervalSince(messages[q].date) < 600,
-              let a = messages[(q + 1)...].first(where: { !$0.fromUser && !$0.isError }) else { return "" }
-        return "Earlier I asked: \(messages[q].text)\nYou answered: \(String(a.text.prefix(600)))"
+              let a = messages[(q + 1)...].last(where: { !$0.fromUser && !$0.isError && $0.text != Self.stillTranscribing }) else { return nil }
+        let question = messages[q].text
+        return ("Earlier I asked: \(question)\nYou answered: \(String(a.text.prefix(600)))", question,
+                Set(messages[q].about ?? []).union(a.about ?? []))
     }
+
+    /// Said when catching up on the last few seconds takes too long (not an answer to follow on from).
+    private static let stillTranscribing = "The last few seconds are still being transcribed, so this may miss them."
 
     /// The question being worked out, for Stop.
     @ObservationIgnored private var current: Task<Void, Never>?
@@ -791,7 +869,9 @@ final class AppModel {
     /// Listening on or off, from a control or a Shortcut, without opening the app.
     func toggleListeningFromShortcut(forward: ComeForward? = nil, recordingIntent: Bool = false) async -> String {
         buttonPressedAt = Date()
-        if recording {
+        // A press while a start's under way (the speech model downloading, say) is a change of
+        // mind: it stops, rather than joining the start.
+        if recording || isStarting {
             setListening(false)
             return "WTF has stopped listening."
         }
