@@ -104,13 +104,20 @@ struct StopListeningSheet: View {
         // Scrolls, and the waveform makes way, so the buttons aren't cut off at large text sizes.
         ScrollView {
             VStack(spacing: 18) {
+                // Paused (a call or Siri has the microphone): a still, struck-out waveform, as on the
+                // Listen button, and it doesn't say it's listening.
                 if !typeSize.isAccessibilitySize {
-                    Image(systemName: "waveform")
-                        .font(.system(size: 40, weight: .medium))
-                        .symbolEffect(.variableColor.iterative, options: .repeating)
+                    if model.paused {
+                        Image(systemName: "waveform.slash")
+                            .font(.system(size: 40, weight: .medium))
+                    } else {
+                        Image(systemName: "waveform")
+                            .font(.system(size: 40, weight: .medium))
+                            .symbolEffect(.variableColor.iterative, options: .repeating)
+                    }
                 }
                 VStack(spacing: 4) {
-                    Text("WTF is listening").font(.title2.bold())
+                    Text(model.paused ? "Listening is paused" : "WTF is listening").font(.title2.bold())
                     if let since = model.listeningSince {
                         Text("Since \(since.formatted(date: .omitted, time: .shortened))")
                             .font(.subheadline).foregroundStyle(.secondary)
@@ -153,30 +160,6 @@ struct StopListeningSheet: View {
     }
 }
 
-/// No longer used (tabs change from the tab bar only); kept until AskView stops setting
-/// sidewaysScrollUntil, then to be deleted. It changed tab with a swipe anywhere on a screen.
-struct TabSwipe: ViewModifier {
-    @Environment(AppModel.self) private var model
-    /// Set by anything that scrolls sideways itself, so its swipes don't change tab.
-    nonisolated(unsafe) static var sidewaysScrollUntil = Date.distantPast
-
-    func body(content: Content) -> some View {
-        content.simultaneousGesture(
-            DragGesture(minimumDistance: 30, coordinateSpace: .global).onEnded { drag in
-                guard model.pathIsEmpty(for: model.tab), Date() > Self.sidewaysScrollUntil else { return }
-                let dx = drag.translation.width, dy = drag.translation.height
-                let width = UIScreen.main.bounds.width
-                guard abs(dx) > abs(dy) * 2,
-                      abs(dx) > 80 || abs(drag.predictedEndTranslation.width) > 200,
-                      drag.startLocation.x > 24, drag.startLocation.x < width - 24 else { return }
-                let next = model.tab + (dx < 0 ? 1 : -1)
-                guard (0...3).contains(next) else { return }
-                withAnimation(.snappy) { model.tab = next }
-            }
-        )
-    }
-}
-
 /// Listening on or off, in words, in the app's quiet black and white: "Listen" with a still
 /// waveform when it's off, a moving one and "Listening" when it's on (tap to stop), and "Paused"
 /// while something else (a call, Siri) has the microphone.
@@ -201,13 +184,19 @@ struct ListeningButton: View {
                 } else {
                     Image(systemName: "waveform")
                 }
-                Text(model.recording ? (model.paused ? "Paused" : "Listening") : model.isStarting ? "Starting\u{2026}" : "Listen").font(.subheadline.weight(.medium))
+                Text(model.recording ? (model.paused ? "Paused" : "Listening") : model.isStarting ? starting : "Listen").font(.subheadline.weight(.medium))
             }
             .foregroundStyle(.primary)
             .padding(.horizontal, 4)
         }
         .accessibilityHint(model.recording ? (model.paused ? "Tries to carry on listening" : "Stops listening") : model.isStarting ? "Cancels starting" : "Starts listening")
         .sensoryFeedback(.impact(weight: .medium), trigger: model.recording)
+    }
+
+    /// The first start downloads speech recognition, which can take minutes: how far it's got.
+    private var starting: String {
+        guard let p = model.speechDownload else { return "Starting\u{2026}" }
+        return "Downloading \(Int(p * 100))%"
     }
 }
 

@@ -132,6 +132,9 @@ final class ActionItem {
     var status: String
     var conversationID: UUID?
     var created: Date
+    /// When it was ticked off or turned down: kept for Keep Transcripts from then, not from when
+    /// it was heard (which could be long since).
+    var doneAt: Date?
 
     init(type: String, title: String, start: Date? = nil, allDay: Bool = false, place: String? = nil, quote: String? = nil,
          status: String = "suggested", conversationID: UUID? = nil) {

@@ -24,11 +24,14 @@ actor SpeechEngine {
 
     private func transcriberLocale() async -> Locale {
         if let locale { return locale }
+        // The iPhone's own language, not Locale.current: WTF ships only in English, so that's
+        // always English whatever the iPhone's set to.
+        let phone = Locale(identifier: Locale.preferredLanguages.first ?? "en-US")
         let equivalent: Locale?
         if Self.usesDictation {
-            equivalent = await DictationTranscriber.supportedLocale(equivalentTo: Locale.current)
+            equivalent = await DictationTranscriber.supportedLocale(equivalentTo: phone)
         } else {
-            equivalent = await SpeechTranscriber.supportedLocale(equivalentTo: Locale.current)
+            equivalent = await SpeechTranscriber.supportedLocale(equivalentTo: phone)
         }
         let found = equivalent ?? Locale(identifier: "en-US")
         locale = found
@@ -141,11 +144,14 @@ actor SpeechEngine {
     }
 
     /// Fetches the speech model if the phone doesn't have it yet (Apple hosts it; it's shared with dictation).
-    func prepare() async throws {
+    /// [progress]: how far the download's got (0 to 1), as it goes: the first start can take minutes.
+    func prepare(progress: @escaping @Sendable (Double) -> Void = { _ in }) async throws {
         let locale = await transcriberLocale()
         let t = await makeTranscriber()
         if let request = try await AssetInventory.assetInstallationRequest(supporting: [t]) {
             Log.info("Downloading the speech model for \(locale.identifier)")
+            let watching = request.progress.observe(\.fractionCompleted, options: [.initial]) { p, _ in progress(p.fractionCompleted) }
+            defer { watching.invalidate() }
             try await request.downloadAndInstall()
             Log.info("Speech model for \(locale.identifier) installed")
         } else {

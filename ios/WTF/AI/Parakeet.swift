@@ -17,8 +17,9 @@ actor Parakeet {
     static var enabled: Bool { UserDefaults.standard.bool(forKey: "parakeet") }
     /// The model's on the phone.
     static var downloaded: Bool { UserDefaults.standard.bool(forKey: "parakeetDownloaded") }
-    /// English only (that's the model): in any other language Apple's is used.
-    static var suitable: Bool { Locale.current.language.languageCode == .english }
+    /// English only (that's the model): in any other language Apple's is used. The iPhone's own
+    /// language, not Locale.current: WTF ships only in English, so that's always English.
+    static var suitable: Bool { Locale(identifier: Locale.preferredLanguages.first ?? "en-US").language.languageCode == .english }
     /// It's switched on, downloaded and suits the language.
     static var inUse: Bool { enabled && downloaded && suitable }
 
@@ -89,6 +90,8 @@ actor Parakeet {
     }
 
     private func wordsNow(_ url: URL) async throws -> [SpeakerAlign.Word] {
+        // Switched off while this waited its turn: not downloaded again (Apple's is used).
+        guard Self.enabled else { throw NotLoaded() }
         try await prepare()
         guard let manager else { throw NotLoaded() }
         transcribing = true
@@ -103,8 +106,18 @@ actor Parakeet {
 
     /// Switched off in Settings: the download goes, to give the space back.
     func remove() async {
+        // The download going on is stopped and waited for, so it can't put files back once
+        // they're deleted.
+        let job = loading
         cancelLoading()
+        _ = await job?.result
         await queue?.value
+        // Switched on again meanwhile: it's wanted after all, and a new download may be under way
+        // into the same place, so it's left alone.
+        guard loading == nil, !Self.enabled else {
+            Log.info("Better Accuracy switched on again while it was being removed; kept")
+            return
+        }
         release()
         try? FileManager.default.removeItem(at: AsrModels.defaultCacheDirectory(for: .v2))
         UserDefaults.standard.set(false, forKey: "parakeetDownloaded")

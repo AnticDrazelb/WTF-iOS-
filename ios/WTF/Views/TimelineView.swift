@@ -469,7 +469,8 @@ struct ConversationView: View {
             Button("Delete", role: .destructive) {
                 let id = conversation.id
                 dismiss()
-                Task { await model.deleteConversation(id) }
+                // Its page closes itself: the day it came from stays open behind it.
+                Task { await model.deleteConversation(id, fromItsPage: true) }
             }
         } message: {
             Text("Its transcript, recording and suggestions go too. This can\u{2019}t be undone.")
@@ -606,8 +607,12 @@ func displayTitle(_ c: Conversation) -> String {
 @MainActor func renameConversation(_ c: Conversation, to title: String) {
     let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !t.isEmpty else { return }
+    // Shown at once here; and saved by the pipeline too, where summaries are written, so one
+    // finishing now can't put its own title back over yours.
     c.title = t
     try? c.modelContext?.save()
+    let id = c.id
+    Task { await AppModel.shared.pipeline.rename(id, to: t) }
 }
 
 /// "Today · 13 Oct", "Yesterday · 12 Oct", "Saturday · 10 Oct".

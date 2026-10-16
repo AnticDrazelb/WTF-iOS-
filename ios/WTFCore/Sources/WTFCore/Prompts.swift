@@ -216,8 +216,9 @@ public enum Prompts {
         return " That conversation was on \(f.string(from: start)), so say when rather than \"just\"."
     }
 
+    /// In the iPhone's own clock (12 or 24 hours): the AI copies it into its answers.
     static func clock(_ d: Date) -> String {
-        let f = DateFormatter(); f.dateFormat = "EEEE HH:mm"
+        let f = DateFormatter(); f.setLocalizedDateFormatFromTemplate("EEEEjmm")
         return f.string(from: d)
     }
 

@@ -374,8 +374,14 @@ public enum ActionRules {
         var kept = model.filter { a in
             !(a.type == .event && (bogusEventTitle.test(a.title) || (a.whenText.map(vagueWhen.test) ?? false)))
         }
+        // The same plan said for two days ("MOT on Tuesday", then "the MOT's Thursday now"): two
+        // finds, so the moved date isn't lost as a duplicate.
+        func otherDay(_ k: ExtractedAction, _ r: ExtractedAction) -> Bool {
+            guard k.type == .event, r.type == .event, let a = k.resolved, let b = r.resolved else { return false }
+            return [a.year, a.month, a.day] != [b.year, b.month, b.day]
+        }
         for r in rules {
-            if let i = kept.firstIndex(where: { $0.type == r.type && similar($0.title, r.title) }) {
+            if let i = kept.firstIndex(where: { $0.type == r.type && similar($0.title, r.title) && !otherDay($0, r) }) {
                 if kept[i].source == nil { kept[i].source = r.source }
                 if r.resolved?.doubt != nil { kept[i].note = r.note }
             }
@@ -385,13 +391,16 @@ public enum ActionRules {
                     let sameDay = k.resolved.map { [$0.year, $0.month, $0.day] } == r.resolved.map { [$0.year, $0.month, $0.day] } && k.resolved != nil
                     // The same day alone isn't enough: "Dentist" and "Party" tomorrow are two plans.
                     let sameTime = k.resolved?.hour != nil && k.resolved?.hour == r.resolved?.hour && k.resolved?.minute == r.resolved?.minute
-                    return similar(k.title, r.title) || (sameDay && (overlap(k.title, r.title) > 0 || sameTime))
+                    return (similar(k.title, r.title) && !otherDay(k, r)) || (sameDay && (overlap(k.title, r.title) > 0 || sameTime))
                 }
                 return (k.type == r.type && similar(k.title, r.title)) || (r.type == .buy && k.type == .todo && similar(k.title, r.title))
             }
             if !dup { kept.append(r) }
         }
         var seen = Set<String>()
-        return kept.filter { seen.insert($0.type.rawValue + "|" + $0.title.lowercased()).inserted }
+        return kept.filter { a in
+            let day = a.type == .event ? a.resolved.map { "|\($0.year)-\($0.month)-\($0.day)" } ?? "" : ""
+            return seen.insert(a.type.rawValue + "|" + a.title.lowercased() + day).inserted
+        }
     }
 }

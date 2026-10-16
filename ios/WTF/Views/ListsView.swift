@@ -71,10 +71,10 @@ struct ListsView: View {
         let kept = listed(group.id)
         Section {
             ForEach(waiting) { s in
-                SuggestionRow(item: s, onAccept: { accept(s) }, onDismiss: { s.status = "dismissed"; save() })
+                SuggestionRow(item: s, onAccept: { accept(s) }, onDismiss: { finish(s, as: "dismissed") })
                     // As the kept items below: swipe it away, or swipe the other way to add it.
                     .swipeActions(edge: .trailing) {
-                        Button("Dismiss", systemImage: "xmark", role: .destructive) { s.status = "dismissed"; save() }
+                        Button("Dismiss", systemImage: "xmark", role: .destructive) { finish(s, as: "dismissed") }
                     }
                     .swipeActions(edge: .leading) {
                         Button(s.type == "EVENT" ? "Add to Calendar" : "Add", systemImage: "plus") { accept(s) }
@@ -88,20 +88,20 @@ struct ListsView: View {
                         if item.type == "EVENT" {
                             Button("Add to Calendar", systemImage: "calendar.badge.plus") { calendarItem = item }
                         }
-                        Button("Delete", systemImage: "trash", role: .destructive) { item.status = "dismissed"; save() }
+                        Button("Delete", systemImage: "trash", role: .destructive) { finish(item, as: "dismissed") }
                     }
             }
             .onDelete { offsets in
-                for i in offsets { kept[i].status = "dismissed" } // kept as dismissed, so it isn't suggested again
+                for i in offsets { finish(kept[i], as: "dismissed", saving: false) } // kept as dismissed, so it isn't suggested again
                 save()
             }
             if showCompleted {
                 let done = completed(group.id)
                 ForEach(done) { item in
-                    CheckRow(item: item, ticking: false, done: true) { item.status = "accepted"; save() }
+                    CheckRow(item: item, ticking: false, done: true) { item.status = "accepted"; item.doneAt = nil; save() }
                 }
                 .onDelete { offsets in
-                    for i in offsets { done[i].status = "dismissed" }
+                    for i in offsets { finish(done[i], as: "dismissed", saving: false) }
                     save()
                 }
             }
@@ -150,9 +150,15 @@ struct ListsView: View {
             try? await Task.sleep(for: .seconds(1.2))
             guard ticking.contains(item.id) else { return }
             ticking.remove(item.id)
-            item.status = "done"
-            save()
+            finish(item, as: "done")
         }
+    }
+
+    /// Ticked off or turned down: from now it's kept only as long as Keep Transcripts says.
+    private func finish(_ item: ActionItem, as status: String, saving: Bool = true) {
+        item.status = status
+        item.doneAt = Date()
+        if saving { save() }
     }
 
     private func add(_ type: String) {

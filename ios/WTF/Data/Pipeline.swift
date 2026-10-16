@@ -350,7 +350,9 @@ actor Pipeline {
             }
             return meaning * 10 + min(score(c, keys), 15)
         }
-        let best = pool.map { ($0, rank($0)) }.max { $0.1 < $1.1 }?.0
+        // Nothing to go on ("WTF?"): the newest conversation (the pool is newest first), not an
+        // older one that happens to win on meaning.
+        let best = keys.isEmpty && focus == nil ? pool.first : pool.map { ($0, rank($0)) }.max { $0.1 < $1.1 }?.0
         let notes = pool.prefix(12).map { (label: label($0), title: $0.title, summary: $0.summary) }
         var used = focus.map { [$0] } ?? []
         guard let best else { return (notes, nil, "", used) }
@@ -732,10 +734,13 @@ actor Pipeline {
         return (shown, elsewhere)
     }
 
-    /// A named person called something else, everywhere.
+    /// A named person called something else, everywhere. Not to a name someone else has: that
+    /// would merge two people.
     func renamePerson(_ id: UUID, to typed: String) {
         guard let p = (try? modelContext.fetch(FetchDescriptor<Person>(predicate: #Predicate { $0.id == id })))?.first,
               !p.isMe, let name = Labels.cleanName(typed), name != Labels.me, name != p.name else { return }
+        let people = (try? modelContext.fetch(FetchDescriptor<Person>())) ?? []
+        if people.contains(where: { $0.id != p.id && $0.name.caseInsensitiveCompare(name) == .orderedSame }) { return }
         let old = p.name
         p.name = name
         for c in (try? modelContext.fetch(FetchDescriptor<Conversation>())) ?? [] where c.transcript.contains("] \(old): ") {
@@ -750,6 +755,25 @@ actor Pipeline {
         guard let p = ((try? modelContext.fetch(FetchDescriptor<Person>())) ?? []).first(where: { !$0.isMe && $0.name == old }) else { return false }
         renamePerson(p.id, to: typed)
         return true
+    }
+
+    /// A person forgotten (Settings › People): their voice goes from the conversations too, so
+    /// it isn't matched again from there.
+    func forgetVoice(named name: String) {
+        var changed = false
+        for c in (try? modelContext.fetch(FetchDescriptor<Conversation>())) ?? [] where c.voiceprints.contains(where: { $0.label == name }) {
+            c.voiceprints = c.voiceprints.filter { $0.label != name }
+            changed = true
+        }
+        if changed { try? modelContext.save() }
+    }
+
+    /// A conversation renamed by you: saved here, so a summary being written meanwhile doesn't
+    /// put its own title back over it.
+    func rename(_ id: UUID, to title: String) {
+        guard let c = conversation(id) else { return }
+        c.title = title
+        try? modelContext.save()
     }
 
     private func relabel(_ c: Conversation, from: String, to: String) {
@@ -1047,7 +1071,7 @@ actor Pipeline {
         }
         var fresh: [ExtractedAction] = []
         for a in found where !mine.contains(where: { sameAsMine($0, a) }) && !open.contains(where: { matches($0, a) && sameDay($0, a) })
-            && !fresh.contains(where: { $0.type == a.type && $0.title.lowercased() == a.title.lowercased() && onSameDay($0, a) }) {
+            && !fresh.contains(where: { $0.type == a.type && ($0.title.lowercased() == a.title.lowercased() || ActionRules.similar($0.title, a.title)) && onSameDay($0, a) }) {
             fresh.append(a)
         }
         // Appointments checked against the calendar: already there, nothing to suggest; there at

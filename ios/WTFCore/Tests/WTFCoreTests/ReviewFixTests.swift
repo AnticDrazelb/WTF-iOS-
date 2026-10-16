@@ -114,8 +114,21 @@ final class ReviewFixTests: XCTestCase {
         let today = ListAnswers.answer("What's on today?", open: items, now: now, calendar: london) ?? ""
         XCTAssertTrue(today.contains("Dentist") && !today.contains("MOT"), today)
         XCTAssertEqual(ListAnswers.answer("Any meetings tomorrow?", open: items, now: now, calendar: london),
-                       "I haven't heard about any appointments tomorrow.")
+                       "No appointments tomorrow on your list.")
         XCTAssertEqual(ListAnswers.answer("What have I got to buy?", open: items, now: now, calendar: london), "To buy:\n\u{2022} Milk")
         XCTAssertEqual(ListAnswers.answer("Nothing on my lists?", open: [], now: now, calendar: london), "Nothing on your lists.")
+    }
+
+    func testListAnswersSayWhatWasHeardButNotAdded() {
+        let now = date(2026, 10, 12, 9, 0)
+        let items = [ListAnswers.Item(type: .buy, title: "Milk"), ListAnswers.Item(type: .buy, title: "Eggs", suggested: true),
+                     ListAnswers.Item(type: .event, title: "MOT", start: date(2026, 10, 15, 9, 0), suggested: true)]
+        XCTAssertEqual(ListAnswers.answer("What have I got to buy?", open: items, now: now, calendar: london),
+                       "To buy:\n\u{2022} Milk\n\nHeard, not added yet:\n\u{2022} Eggs")
+        let events = ListAnswers.answer("Any appointments?", open: items, now: now, calendar: london) ?? ""
+        XCTAssertTrue(events.hasPrefix("No upcoming appointments on your list.\n\nHeard, not added yet:\n\u{2022} MOT: "), events)
+        let all = ListAnswers.answer("What's on my list?", open: items, now: now, calendar: london) ?? ""
+        XCTAssertTrue(all.hasPrefix("To buy:\n\u{2022} Milk\n\nHeard, not added yet:\n\u{2022} Eggs\n\u{2022} MOT: "), all)
+        XCTAssertEqual(ListAnswers.answer("What's on my to-do list?", open: items, now: now, calendar: london), "Nothing on your to-do list.")
     }
 }

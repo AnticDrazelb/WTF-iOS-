@@ -112,10 +112,14 @@ public enum TranscriptFormat {
 public enum ListAnswers {
     public struct Item: Sendable {
         public var type: ActionType, title: String, start: Date?, allDay: Bool, place: String?
-        public init(type: ActionType, title: String, start: Date? = nil, allDay: Bool = false, place: String? = nil) {
-            self.type = type; self.title = title; self.start = start; self.allDay = allDay; self.place = place
+        /// Heard but not added to the list yet: said after what's on it, as not added.
+        public var suggested: Bool
+        public init(type: ActionType, title: String, start: Date? = nil, allDay: Bool = false, place: String? = nil, suggested: Bool = false) {
+            self.type = type; self.title = title; self.start = start; self.allDay = allDay; self.place = place; self.suggested = suggested
         }
     }
+
+    static let notAdded = "Heard, not added yet:"
 
     /// Not "pick up" or "the shops" alone: "When do I pick up Ezra?", "What time do the shops shut?";
     /// nor any "buy": "What should I buy Mum?" is about a present, not the list.
@@ -132,9 +136,6 @@ public enum ListAnswers {
         // Only clear list questions; anything about the past goes to the AI.
         if Rx(#"\b(was|were|said|saying|earlier|yesterday|did|tell|told|decide|decided|happen|happened|who|why|talk|talked|discuss|discussed|mention|mentioned|should)\b"#).test(q) { return nil }
         if forSomeone.test(question) { return nil }
-        func list(_ items: [Item], _ empty: String, _ header: String) -> String {
-            items.isEmpty ? empty : header + "\n" + items.map { "\u{2022} \($0.title)" }.joined(separator: "\n")
-        }
         func formatter(_ template: String) -> DateFormatter {
             let f = DateFormatter()
             f.calendar = calendar; f.timeZone = calendar.timeZone; f.locale = calendar.locale ?? .current
@@ -147,25 +148,35 @@ public enum ListAnswers {
         let upcoming = open.filter { $0.type == .event && ($0.start ?? .distantFuture) >= now.addingTimeInterval(-3600) }
             .filter { e in day.map { d in e.start.map { calendar.isDate($0, inSameDayAs: d) } ?? false } ?? true }
             .sorted { ($0.start ?? .distantFuture) < ($1.start ?? .distantFuture) }
-        func coming(_ empty: String) -> String {
-            if upcoming.isEmpty { return empty }
-            let f = formatter("EEEdMMMjmm"), d = formatter("EEEdMMM")
-            return "Coming up:\n" + upcoming.map { e in
-                "\u{2022} \(e.title): " + (e.start.map { e.allDay ? d.string(from: $0) : f.string(from: $0) } ?? "date not clear") + (e.place.map { " (\($0))" } ?? "")
-            }.joined(separator: "\n")
+        let f = formatter("EEEdMMMjmm"), d = formatter("EEEdMMM")
+        func line(_ i: Item) -> String {
+            guard i.type == .event else { return "\u{2022} \(i.title)" }
+            return "\u{2022} \(i.title): " + (i.start.map { i.allDay ? d.string(from: $0) : f.string(from: $0) } ?? "date not clear") + (i.place.map { " (\($0))" } ?? "")
         }
+        func lines(_ items: [Item]) -> String { items.map(line).joined(separator: "\n") }
+        // What's on the list first; then what was heard but not added, so it isn't missed.
+        func list(_ items: [Item], _ empty: String, _ header: String) -> String {
+            let added = items.filter { !$0.suggested }, heard = items.filter(\.suggested)
+            let first = added.isEmpty ? empty : header + "\n" + lines(added)
+            return heard.isEmpty ? first : first + "\n\n" + notAdded + "\n" + lines(heard)
+        }
+        func coming(_ empty: String) -> String { list(upcoming, empty, "Coming up:") }
         let when = day == nil ? "upcoming appointments" : Rx(#"\btomorrow\b"#).test(q) ? "appointments tomorrow" : "appointments today"
         // "When…", "What time…": about a plan, not the list.
         if shopping.test(q), !Rx(#"\b(when|what time)\b"#).test(q) { return list(open.filter { $0.type == .buy }, "Nothing to buy on your list.", "To buy:") }
         if todos.test(q) { return list(open.filter { $0.type == .todo }, "Nothing on your to-do list.", "Still to do:") }
         // "What's on my list?": everything on it, not just the appointments.
         if allLists.test(q) {
-            let buy = open.filter { $0.type == .buy }, todo = open.filter { $0.type == .todo }
-            let parts = [buy.isEmpty ? nil : list(buy, "", "To buy:"), todo.isEmpty ? nil : list(todo, "", "Still to do:"),
-                         upcoming.isEmpty ? nil : coming("")].compactMap { $0 }
+            // What was heard but not added comes last, all together.
+            let added = open.filter { !$0.suggested }, soon = upcoming.filter { !$0.suggested }
+            let buy = added.filter { $0.type == .buy }, todo = added.filter { $0.type == .todo }
+            let heard = open.filter { $0.suggested && $0.type != .event } + upcoming.filter(\.suggested)
+            let parts = [buy.isEmpty ? nil : "To buy:\n" + lines(buy), todo.isEmpty ? nil : "Still to do:\n" + lines(todo),
+                         soon.isEmpty ? nil : "Coming up:\n" + lines(soon),
+                         heard.isEmpty ? nil : notAdded + "\n" + lines(heard)].compactMap { $0 }
             return parts.isEmpty ? "Nothing on your lists." : parts.joined(separator: "\n\n")
         }
-        if events.test(q) { return coming("I haven't heard about any \(when).") }
+        if events.test(q) { return coming("No \(when) on your list.") }
         return nil
     }
 }

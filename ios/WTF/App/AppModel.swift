@@ -24,17 +24,9 @@ final class AppModel {
     /// The answer being written, word by word.
     var streaming: String?
     var tab = 0
-    /// What's open on top of the Timeline and Settings tabs (for swiping between tabs).
+    /// What's open on top of the Timeline and Settings tabs (closed when what it shows is deleted).
     var timelinePath = NavigationPath()
     var settingsPath = NavigationPath()
-
-    func pathIsEmpty(for tab: Int) -> Bool {
-        switch tab {
-        case 1: return timelinePath.isEmpty
-        case 3: return settingsPath.isEmpty
-        default: return true
-        }
-    }
     var problem: String?
     /// Tapping the listening pill in the Dynamic Island: the sheet to stop listening.
     var stopSheet = false
@@ -52,11 +44,17 @@ final class AppModel {
     /// Whether anything's been heard to answer "what was I saying?" from. Until it has, there's
     /// nothing to say, so the card, the pill and the stop sheet don't offer it.
     var hasHeard = false
-    /// Listening's on but the microphone isn't running: something (a call, Siri) has it.
-    var paused = false
+    /// Listening's on but the microphone isn't running: something (a call, Siri) has it. The
+    /// card and the pill say so wherever it's set.
+    var paused = false {
+        didSet { if paused != oldValue { ListeningActivity.shared.paused(paused) } }
+    }
     /// Settings › Better Accuracy's download, while it's under way: kept here rather than on the
     /// page, so the bar carries on when the page is rebuilt (after Delete All, say).
     var betterProgress: Double?
+    /// How far the speech model's download has got (0 to 1), while one's under way: shown in place
+    /// of "Starting…", as the first start can take minutes.
+    var speechDownload: Double?
 
     static let quickQuestion = "WTF was I just on about?"
 
@@ -109,6 +107,12 @@ final class AppModel {
         }
         Recorder.shared.onSpeech = { samples, chunk, offset in LiveTranscriber.shared.feed(samples, chunk: chunk, offset: offset) }
         Recorder.shared.onDiscard = { chunk in LiveTranscriber.shared.drop(chunk: chunk) }
+        // Nothing's being saved while this lasts: said where WTF says what's wrong, not only in Diagnostics.
+        Recorder.shared.onProblem = { _ in
+            Task { @MainActor in
+                AppModel.shared.problem = "WTF can\u{2019}t save recordings. Check your iPhone has free space."
+            }
+        }
         // iOS doesn't always say when a call's over, so if listening hasn't come back in a few
         // minutes, a notification says so (and is withdrawn if it does come back).
         Recorder.shared.onInterrupted = {
@@ -220,7 +224,7 @@ final class AppModel {
             }
             guard !Recorder.shared.stalled else {
                 paused = true
-                problem = "Listening stopped: something else has the microphone. Tap to carry on."
+                problem = "Paused: something else has the microphone. Tap to carry on."
                 return false
             }
             paused = false
@@ -265,9 +269,14 @@ final class AppModel {
         // A stalled download is given up on (it carries on in the system, for the next try), so
         // the starts waiting behind this one aren't stuck.
         if !(await SpeechEngine.shared.isReady()) {
+            speechDownload = 0
             let fetched: Bool? = await withDeadline(180) { () -> Bool? in
                 // A task of its own, so giving up on it doesn't cancel the download too.
-                let download = Task { try await SpeechEngine.shared.prepare() }
+                let download = Task {
+                    try await SpeechEngine.shared.prepare { p in
+                        Task { @MainActor in if AppModel.shared.speechDownload != nil { AppModel.shared.speechDownload = p } }
+                    }
+                }
                 do {
                     try await download.value
                     return true
@@ -276,6 +285,7 @@ final class AppModel {
                     return false
                 }
             }
+            speechDownload = nil
             if stops != stopsBefore { return await standDown() }
             // It can finish without installing anything (iOS declined, or nothing for this language).
             guard fetched == true, await SpeechEngine.shared.isReady() else {
@@ -294,7 +304,13 @@ final class AppModel {
         heardSomething(await pipeline.conversationCount() > 0)
         // The Lock Screen card first: iOS only lets an app start the microphone from the Lock
         // Screen or the Action button if its card is showing.
-        ListeningActivity.shared.start()
+        let carded = ListeningActivity.shared.start()
+        // From the background, iOS won't let the microphone on without the card: said plainly,
+        // rather than as a microphone error after the tries.
+        if !carded, ListeningActivity.allowed, UIApplication.shared.applicationState == .background {
+            problem = "Couldn\u{2019}t show the Lock Screen card, so WTF can\u{2019}t listen from here. Open WTF to start."
+            return false
+        }
         await LiveTranscriber.shared.start()
         if stops != stopsBefore { return await standDown() }
         do {
@@ -402,7 +418,7 @@ final class AppModel {
                 guard recording else { return }
                 if Recorder.shared.stalled {
                     paused = true
-                    problem = "Listening stopped: something else has the microphone. Tap to carry on."
+                    problem = "Paused: something else has the microphone. Tap to carry on."
                 } else {
                     paused = false
                     problem = nil
@@ -489,9 +505,10 @@ final class AppModel {
     /// One conversation deleted (from the Timeline or its own page): it, its suggestions and
     /// what was asked about it go. Deleted here, where the screens' copies are, so none is left
     /// pointing at it; the pipeline lets go of it first.
-    func deleteConversation(_ id: UUID) async {
+    /// [fromItsPage]: its own page has closed itself, so the pages under it (its day) stay open.
+    func deleteConversation(_ id: UUID, fromItsPage: Bool = false) async {
         let found = (try? container.mainContext.fetch(FetchDescriptor<Conversation>(predicate: #Predicate { $0.id == id }))) ?? []
-        await remove(found)
+        await remove(found, keepPath: fromItsPage)
     }
 
     /// Conversations older than Settings › Keep Transcripts go, with what was asked about them.
@@ -504,8 +521,10 @@ final class AppModel {
         let cutoff = Date().addingTimeInterval(-Double(days == 0 ? 7 : days) * 86_400)
         let context = container.mainContext
         // Ticked-off and turned-down list items are kept a while (so they aren't suggested again
-        // from the same talk), then go too: here, where the List's copies are.
-        let finished = (try? context.fetch(FetchDescriptor<ActionItem>(predicate: #Predicate { ($0.status == "done" || $0.status == "dismissed") && $0.created < cutoff }))) ?? []
+        // from the same talk), then go too: here, where the List's copies are. Counted from when
+        // they were ticked off (those from before that was kept, from when they were heard).
+        let finished = ((try? context.fetch(FetchDescriptor<ActionItem>(predicate: #Predicate { $0.status == "done" || $0.status == "dismissed" }))) ?? [])
+            .filter { ($0.doneAt ?? $0.created) < cutoff }
         if !finished.isEmpty {
             for item in finished { context.delete(item) }
             try? context.save()
@@ -533,7 +552,8 @@ final class AppModel {
     /// go of them, then they're deleted where the screens' copies are, so none is left pointing at one.
     /// [onlyIfShown]: the Timeline's pages close only if one of them is showing one of these.
     /// [inProgress]: one still open may be the conversation going on, so what's being recorded goes too.
-    private func remove(_ conversations: [Conversation], keepFacts: Bool = false, onlyIfShown: Bool = false, inProgress: Bool = true) async {
+    /// [keepPath]: the page showing it has closed itself already; the ones under it stay.
+    private func remove(_ conversations: [Conversation], keepFacts: Bool = false, onlyIfShown: Bool = false, inProgress: Bool = true, keepPath: Bool = false) async {
         guard !conversations.isEmpty else { return }
         let context = container.mainContext
         let keys = conversations.map(\.persistentModelID)
@@ -544,7 +564,7 @@ final class AppModel {
         // Nothing said what's on screen: closed to be safe, as a page left on a deleted one can crash.
         let known = !onScreen.isEmpty || !daysOnScreen.isEmpty
         let shown = !known || !onScreen.isDisjoint(with: ids) || days.contains { daysOnScreen.contains(Calendar.current.startOfDay(for: $0)) }
-        if !onlyIfShown || shown { timelinePath = NavigationPath() }
+        if !keepPath && (!onlyIfShown || shown) { timelinePath = NavigationPath() }
         try? await Task.sleep(for: .milliseconds(350))
         let goingOn = inProgress && conversations.contains(where: { !$0.closed })
         // The answer kept ready for the Action button, and the words just heard, are about the
@@ -758,8 +778,12 @@ final class AppModel {
     /// Settings › People › Forget: deleted where the People list's copies are (deleting it from the
     /// pipeline's own context while the list showed it could crash).
     func forgetPerson(_ person: Person) {
+        let name = person.voice.label
         container.mainContext.delete(person)
         try? container.mainContext.save()
+        // Their voice in the conversations goes too, so it isn't matched again from there.
+        let pipeline = pipeline
+        Task { await pipeline.forgetVoice(named: name) }
     }
 
     /// Whether there's anything to answer "what was I saying?" from (see hasHeard).
@@ -887,7 +911,8 @@ final class AppModel {
     /// Your list, read out (or shown): what's coming up, what to do, what to buy.
     func listFromShortcut() async -> String {
         buttonPressedAt = Date()
-        let open = openItems()
+        let all = openItems()
+        let open = all.filter { !$0.suggested }
         var parts: [String] = []
         let now = Date()
         let events = open.filter { $0.type == .event && ($0.start ?? .distantFuture) >= now.addingTimeInterval(-3600) }
@@ -901,6 +926,9 @@ final class AppModel {
         if !todos.isEmpty { parts.append("To do: " + todos.joined(separator: ", ") + ".") }
         let buy = open.filter { $0.type == .buy }.prefix(8).map(\.title)
         if !buy.isEmpty { parts.append("To buy: " + buy.joined(separator: ", ") + ".") }
+        // Heard but not added: said last, so it isn't missed.
+        let heard = all.filter(\.suggested).prefix(5).map(\.title)
+        if !heard.isEmpty { parts.append("Heard, not added yet: " + heard.joined(separator: ", ") + ".") }
         let answer = parts.isEmpty ? "Your list's empty." : parts.joined(separator: " ")
         _ = await ReadAloud.shared.startIntoHeadphones(answer)
         return answer
@@ -1009,9 +1037,11 @@ final class AppModel {
         }
     }
 
+    /// What's on the list, and what was heard for it but not added yet (said as such).
     private func openItems() -> [ListAnswers.Item] {
-        let items = (try? container.mainContext.fetch(FetchDescriptor<ActionItem>(predicate: #Predicate { $0.status == "accepted" }))) ?? []
-        return items.map { ListAnswers.Item(type: ActionType(rawValue: $0.type) ?? .todo, title: $0.title, start: $0.start, allDay: $0.allDay, place: $0.place) }
+        let items = (try? container.mainContext.fetch(FetchDescriptor<ActionItem>(predicate: #Predicate { $0.status == "accepted" || $0.status == "suggested" }))) ?? []
+        return items.map { ListAnswers.Item(type: ActionType(rawValue: $0.type) ?? .todo, title: $0.title, start: $0.start, allDay: $0.allDay, place: $0.place,
+                                            suggested: $0.status == "suggested") }
     }
 }
 

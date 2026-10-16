@@ -83,7 +83,9 @@ struct SettingsView: View {
                 Section("On This iPhone") {
                     LabeledContent("Speech Recognition") {
                         // A first start downloads it too: not offered twice meanwhile.
-                        if downloading || (model.isStarting && speechReady != true) { ProgressView() }
+                        if let p = model.speechDownload, downloading || model.isStarting {
+                            Text("Downloading\u{2026} \(Int(p * 100))%").foregroundStyle(.secondary).monospacedDigit()
+                        } else if downloading || (model.isStarting && speechReady != true) { ProgressView() }
                         else if speechReady == true { Text("Ready").foregroundStyle(.secondary) }
                         else if speechReady == false { Button("Download") { download() } }
                         else { ProgressView() }
@@ -206,7 +208,7 @@ struct SettingsView: View {
                         Text("This can\u{2019}t be undone.")
                     }
                 } header: { Text("Conversations") } footer: {
-                    Text("Older conversations and their transcripts are deleted. Your lists and the things WTF knows are kept.")
+                    Text("Older conversations and their transcripts are deleted, as are list items ticked off or dismissed that long ago. What\u{2019}s still on your lists and the things WTF knows are kept.")
                 }
 
                 Section {
@@ -434,13 +436,18 @@ struct SettingsView: View {
 
     private func download() {
         downloading = true
+        model.speechDownload = 0
         Task {
             speechProblem = nil
             // A stalled download is given up on (it carries on in the system, for the next try),
             // so the row isn't left spinning with no way to try again.
             let fetched: Bool? = await withDeadline(180) { () -> Bool? in
                 // A task of its own, so giving up on it doesn't cancel the download too.
-                let fetch = Task { try await SpeechEngine.shared.prepare() }
+                let fetch = Task {
+                    try await SpeechEngine.shared.prepare { p in
+                        Task { @MainActor in if AppModel.shared.speechDownload != nil { AppModel.shared.speechDownload = p } }
+                    }
+                }
                 do {
                     try await fetch.value
                     return true
@@ -449,6 +456,7 @@ struct SettingsView: View {
                     return false
                 }
             }
+            model.speechDownload = nil
             if fetched == nil {
                 speechProblem = "Still downloading. Check Wi-Fi, then try again."
             } else if fetched == false {

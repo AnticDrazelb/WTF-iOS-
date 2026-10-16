@@ -55,6 +55,24 @@ final class EdgeCaseTests: XCTestCase {
         XCTAssertEqual(ActionRules.merge(model, rules).map(\.title), ["Dentist", "Party"])
     }
 
+    func testTheAIsClockFollowsTheIPhones12Or24Hours() {
+        let d = Calendar.current.date(from: DateComponents(year: 2026, month: 10, day: 12, hour: 14, minute: 30))!
+        let twelve = DateFormatter.dateFormat(fromTemplate: "j", options: 0, locale: .current)?.contains("a") ?? false
+        let shown = Prompts.clock(d)
+        XCTAssertTrue(shown.contains(twelve ? "2:30" : "14:30") && !(twelve && shown.contains("14:30")), shown)
+    }
+
+    func testMergeKeepsAPlanMovedToAnotherDay() {
+        let tuesday = WhenResult(year: 2026, month: 10, day: 13, hour: nil, minute: nil)
+        let thursday = WhenResult(year: 2026, month: 10, day: 15, hour: nil, minute: nil)
+        let model = [ExtractedAction(type: .event, title: "MOT", whenText: "Tuesday", resolved: tuesday)]
+        let rules = [ExtractedAction(type: .event, title: "MOT", whenText: "Thursday", resolved: thursday),
+                     ExtractedAction(type: .event, title: "MOT", whenText: "Tuesday", resolved: tuesday)]
+        let merged = ActionRules.merge(model, rules)
+        XCTAssertEqual(merged.map(\.title), ["MOT", "MOT"])
+        XCTAssertEqual(merged.compactMap { $0.resolved?.day }, [13, 15])
+    }
+
     func testLineTimesKeepTheWallClockWhenTheClocksGoForward() {
         // 29 March 2026: London's clocks go forward at 01:00.
         let lines: [Substring] = ["[00:30:00] Speech: Still up?", "[03:00:00] Speech: Yes."]

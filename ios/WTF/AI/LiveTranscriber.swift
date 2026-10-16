@@ -48,6 +48,9 @@ final class LiveTranscriber: @unchecked Sendable {
     private var revivals = 0
     private var diedAt = Date.distantPast
     private var reviving = false
+    /// A start is setting up a recogniser: a second start meanwhile (a revival racing the
+    /// Listen button) does nothing, rather than making another.
+    private var opening = false
 
     private let source = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: rate, channels: 1, interleaved: false)!
 
@@ -60,7 +63,13 @@ final class LiveTranscriber: @unchecked Sendable {
 
     /// [reviving]: started again after it stopped by itself (see revive), not by listening starting.
     func start(reviving: Bool = false) async {
-        guard !running, await SpeechEngine.shared.isReady() else { return }
+        guard locked({ () -> Bool in
+            guard analyzer == nil, !opening else { return false }
+            opening = true
+            return true
+        }) else { return }
+        defer { locked { opening = false } }
+        guard await SpeechEngine.shared.isReady() else { return }
         if !reviving { locked { revivals = 0 } }
         let transcriber = await SpeechEngine.shared.makeTranscriber(live: true)
         let analyzer = SpeechAnalyzer(modules: [transcriber])

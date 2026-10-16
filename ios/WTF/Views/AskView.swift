@@ -187,9 +187,6 @@ struct AskView: View {
                     .disabled(model.status != nil)
                     .padding(.horizontal, 16)
                 }
-                .onScrollPhaseChange { _, phase in
-                    if phase != .idle { TabSwipe.sidewaysScrollUntil = Date().addingTimeInterval(0.6) }
-                }
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
             field
@@ -334,9 +331,6 @@ struct FollowUps: View {
             .controlSize(.small)
             .tint(.primary)
             .font(.subheadline)
-        }
-        .onScrollPhaseChange { _, phase in
-            if phase != .idle { TabSwipe.sidewaysScrollUntil = Date().addingTimeInterval(0.6) }
         }
     }
 

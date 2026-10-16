@@ -56,6 +56,7 @@ final class ListeningActivity {
         guard !showing else { return true }
         guard Self.allowed else { return false }
         state = ListeningAttributes.ContentState(topic: nil, trail: [], since: Date(), hanging: 0, heard: AppModel.shared.hasHeard)
+        state.paused = AppModel.shared.paused
         return request()
     }
 
@@ -77,6 +78,7 @@ final class ListeningActivity {
         state.since = AppModel.shared.listeningSince ?? state.since
         state.answer = nil
         state.heard = AppModel.shared.hasHeard
+        state.paused = AppModel.shared.paused
         Log.info("Lock Screen card had ended while listening; starting it again")
         request()
     }
@@ -145,6 +147,16 @@ final class ListeningActivity {
     func heard(_ heard: Bool) {
         guard state.heard != heard else { return }
         state.heard = heard
+        let content = ActivityContent(state: state, staleDate: Self.fresh)
+        let current = activity
+        Task { await current?.update(content) }
+    }
+
+    /// Listening's on but the microphone isn't running (a call or Siri has it): the card and
+    /// the pill say Paused, with no timer, rather than Listening.
+    func paused(_ paused: Bool) {
+        guard state.paused != paused else { return }
+        state.paused = paused
         let content = ActivityContent(state: state, staleDate: Self.fresh)
         let current = activity
         Task { await current?.update(content) }
