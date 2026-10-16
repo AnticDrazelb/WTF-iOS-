@@ -57,8 +57,14 @@ jobs:
             xcrun simctl ui "$UDID" content_size "$size"
             xcrun simctl terminate "$UDID" com.wtf.ios 2>/dev/null || true
             xcrun simctl launch "$UDID" com.wtf.ios -WTFDemo YES "$@"
-            sleep 8
+            sleep 10
             xcrun simctl io "$UDID" screenshot "shots/$name.png"
+            # A blank screen (still launching) is a small file: give it longer and take it again.
+            for retry in 1 2; do
+              [ "$(stat -f%z "shots/$name.png")" -gt 120000 ] && break
+              sleep 8
+              xcrun simctl io "$UDID" screenshot "shots/$name.png"
+            done
           }
           for look in light dark; do
             for screen in ask timeline conversation lists settings; do
