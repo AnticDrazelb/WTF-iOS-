@@ -64,11 +64,11 @@ final class LiveTranscriber: @unchecked Sendable {
     /// [reviving]: started again after it stopped by itself (see revive), not by listening starting.
     func start(reviving: Bool = false) async {
         guard locked({ () -> Bool in
-            guard analyzer == nil, !opening else { return false }
-            opening = true
+            guard self.analyzer == nil, !self.opening else { return false }
+            self.opening = true
             return true
         }) else { return }
-        defer { locked { opening = false } }
+        defer { locked { self.opening = false } }
         guard await SpeechEngine.shared.isReady() else { return }
         if !reviving { locked { revivals = 0 } }
         let transcriber = await SpeechEngine.shared.makeTranscriber(live: true)
