@@ -55,6 +55,13 @@ struct ActionButtonSetupView: View {
         return phone.major >= 16 || ["iPhone15,2", "iPhone15,3", "iPhone15,4", "iPhone15,5"].contains(phone.machine)
     }()
 
+    /// The iPhone SE (2nd and 3rd generation, iPhone12,8 and 14,6) still has a Home button, so
+    /// Control Center opens from the bottom edge, not the top-right corner.
+    static let hasHomeButton: Bool = {
+        guard let phone = iPhone else { return false }
+        return ["iPhone12,8", "iPhone14,6"].contains(phone.machine)
+    }()
+
     /// The model identifier ("iPhone17,1") and its first number, or nil if this isn't an iPhone. The
     /// Simulator says which iPhone it's pretending to be.
     private static let iPhone: (machine: String, major: Int)? = {
@@ -96,7 +103,9 @@ struct MoreWaysView: View {
                 ? "Rather choose each time? In Settings › Action Button, pick WTF Menu instead of What Was I Saying?"
                 : "Rather choose each time? Use WTF Menu for Back Tap instead of What Was I Saying?")
             way("lock", "Lock Screen", "Hold the Lock Screen, tap Customise, then swap the torch or camera for a WTF button.")
-            way("switch.2", "Control Center", "Swipe down from the top-right corner, tap +, then Add a Control, and pick WTF.")
+            way("switch.2", "Control Center", ActionButtonSetupView.hasHomeButton
+                ? "Swipe up from the bottom edge, tap +, then Add a Control, and pick WTF."
+                : "Swipe down from the top-right corner, tap +, then Add a Control, and pick WTF.")
             // Back Tap only lists shortcuts in your Shortcuts library, not the ones apps offer.
             way("hand.tap", "Back Tap", "Double- or triple-tap the back of the iPhone. In the Shortcuts app, add What Was I Saying? (or WTF Menu) to your shortcuts, then pick it in Settings › Accessibility › Touch › Back Tap.")
         }

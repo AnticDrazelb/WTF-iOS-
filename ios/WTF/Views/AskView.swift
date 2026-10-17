@@ -11,6 +11,8 @@ struct AskView: View {
     @State private var confirmClear = false
     /// At (or near) the latest message: only then does something new scroll the chat down to it.
     @State private var atBottom = true
+    /// Questions sent from here: the tap's bump, not every change to the history.
+    @State private var sent = 0
     /// The send button's circle grows with the text size, so its arrow always fits inside it.
     @ScaledMetric(relativeTo: .subheadline) private var sendSize: CGFloat = 32
     @Query(AskView.latest) private var latest: [Conversation]
@@ -145,8 +147,10 @@ struct AskView: View {
     @ViewBuilder
     private func problemBanner(_ problem: String) -> some View {
         let settings = Self.needsSettings(problem)
-        // Nothing to tap when the store couldn't open: listening again saves nothing.
-        if problem == AppModel.storeLostNote {
+        // Nothing to tap when the store couldn't open, as listening again saves nothing, or while
+        // it's still listening (free space running out): starting again would only hide the note.
+        // Paused is the exception: a tap tries to get the microphone back.
+        if problem == AppModel.storeLostNote || (model.recording && !model.paused && !settings) {
             problemLabel(problem)
         } else {
             // Starting again can't help when it's a setting that's stopping it.
@@ -169,6 +173,10 @@ struct AskView: View {
             .multilineTextAlignment(.leading)
             .frame(maxWidth: .infinity, alignment: .leading)
             .font(.footnote).foregroundStyle(.secondary)
+            // Pinned above the chat, so kept short at the largest text sizes; VoiceOver reads it all.
+            .lineLimit(4)
+            .dynamicTypeSize(...DynamicTypeSize.accessibility1)
+            .accessibilityLabel(problem)
             .padding(.horizontal, 16).padding(.vertical, 8)
             .background(.bar)
             .contentShape(Rectangle())
@@ -260,7 +268,7 @@ struct AskView: View {
             }
             .disabled(!canSend && !asking)
             .accessibilityLabel(asking ? "Stop" : "Ask")
-            .sensoryFeedback(.impact(weight: .light), trigger: model.messages.count)
+            .sensoryFeedback(.impact(weight: .light), trigger: sent)
         }
         .glassEffect(in: .rect(cornerRadius: 22))
         .padding(.horizontal, 16).padding(.top, 6).padding(.bottom, 14)
@@ -277,6 +285,7 @@ struct AskView: View {
         guard canSend else { return }
         let q = input
         input = ""
+        sent += 1
         model.ask(q)
     }
 }

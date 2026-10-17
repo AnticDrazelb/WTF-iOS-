@@ -32,7 +32,11 @@ actor Pipeline {
         toFollow = []
         // Nor are its words kept to answer from (the Action button reads the last few seconds).
         LiveTranscriber.shared.forget()
+        // A retry from an earlier conversation, still waiting (see transcribePending), is kept:
+        // only what could have joined this one goes (drop(spans:) sees to its own retries).
+        let since = (latestConversation()?.start ?? .distantPast).addingTimeInterval(-Double(gapMinutes * 60))
         for chunk in (try? modelContext.fetch(FetchDescriptor<Chunk>(predicate: #Predicate { $0.status == "pending" }))) ?? [] {
+            guard chunk.attempts == 0 || chunk.end >= since else { continue }
             if let path = chunk.path { try? FileManager.default.removeItem(atPath: path) }
             modelContext.delete(chunk)
         }
@@ -78,10 +82,12 @@ actor Pipeline {
     private func gone(_ chunk: Chunk) -> Bool { chunk.isDeleted || chunk.modelContext == nil }
 
     /// Transcribes what's waiting, so a question includes the latest words. Summaries can wait.
+    /// [force]: asked for (Transcribe Now, pull to refresh), so one that failed is tried now too,
+    /// rather than the button doing nothing while it waits.
     @discardableResult
-    func catchUp() async -> Bool {
+    func catchUp(force: Bool = false) async -> Bool {
         let before = transcribing
-        let job = Task { _ = await before?.value; return await self.transcribePending() }
+        let job = Task { _ = await before?.value; return await self.transcribePending(force: force) }
         transcribing = job
         return await job.value
     }
@@ -90,14 +96,14 @@ actor Pipeline {
     /// while, longer each time, not on every recording ahead of what's just been said.
     private var lastTried: [String: Date] = [:]
 
-    private func transcribePending() async -> Bool {
+    private func transcribePending(force: Bool = false) async -> Bool {
         let now = Date()
         let all = (try? modelContext.fetch(FetchDescriptor<Chunk>(
             predicate: #Predicate { $0.status == "pending" }, sortBy: [SortDescriptor(\.start)]))) ?? []
         // New ones first; one that failed waits its turn after them.
         let pending = all.filter { $0.attempts == 0 } + all.filter { chunk in
             guard chunk.attempts > 0 else { return false }
-            guard let path = chunk.path, let tried = lastTried[path] else { return true }
+            guard !force, let path = chunk.path, let tried = lastTried[path] else { return true }
             return now > tried.addingTimeInterval(60 * pow(2, Double(chunk.attempts)))
         }
         guard !pending.isEmpty, await SpeechEngine.shared.isReady() else { return pending.count == all.count }
@@ -173,7 +179,7 @@ actor Pipeline {
                     if !keepAudio { forgetAudio(of: cid) }
                     try? modelContext.save()
                     toFollow.append((cid, text, chunk.start, chunk.end, Doubts.of(words), Doubts.protected(words)))
-                    await suggest(for: c, found: ruleActions(c, new: text))
+                    await suggest(for: c, found: instantActions(c, new: text))
                     guard wiped == generation else { return false }
                     // Deleted in the app meanwhile, with its chunks: gone() can't see that from here.
                     guard conversation(cid) != nil else { continue }
@@ -201,10 +207,10 @@ actor Pipeline {
     }
 
     /// Catch up and follow the topic, then (in the background, without waiting) summarise
-    /// conversations that have gone quiet and tidy away old ones.
-    func run() async {
+    /// conversations that have gone quiet and tidy away old ones. [force]: see catchUp.
+    func run(force: Bool = false) async {
         await refreshVocabulary()
-        await catchUp()
+        await catchUp(force: force)
         let trail = following
         let follow = Task { await trail?.value; await self.followThreads() }
         following = follow
@@ -1020,6 +1026,8 @@ actor Pipeline {
                   let fresh = conversation(id) else { continue }
             fresh.threads = Threads.apply(change, to: fresh.threads, from: next.from, to: next.to)
             try? modelContext.save()
+            // A late retry joins an older conversation: its trail isn't what's being said now.
+            guard latestConversation()?.id == id else { continue }
             await showTrail(of: fresh)
         }
     }
@@ -1045,7 +1053,7 @@ actor Pipeline {
         c.transcript = c.transcript.replacingOccurrences(of: text, with: fixed)
         try? modelContext.save()
         Log.info("Corrected misheard words in \(zip(lines, fixedLines).filter { $0.0 != $0.1 }.count) line(s)")
-        await suggest(for: c, found: ruleActions(c, new: fixed))
+        await suggest(for: c, found: instantActions(c, new: fixed))
         return fixed
     }
 
@@ -1075,6 +1083,14 @@ actor Pipeline {
 
     private func knownVoices() -> [KnownVoice] {
         ((try? modelContext.fetch(FetchDescriptor<Person>())) ?? []).map(\.voice)
+    }
+
+    /// What's suggested the moment it's heard. With the AI, only appointments with a day: to-dos
+    /// and shopping wait for findListItems, where the AI weighs them, as the rules alone are noisy.
+    private func instantActions(_ c: Conversation, new: String) -> [ExtractedAction] {
+        let found = ruleActions(c, new: new)
+        guard Brain.notReadyReason == nil else { return found }
+        return found.filter { $0.type == .event && $0.resolved != nil }
     }
 
     /// [new]: only the lines just added (and the one before, for what led up to them) are looked
@@ -1161,6 +1177,8 @@ actor Pipeline {
         let notesOnly = Prompts.background(memory: c.memory, facts: [])
         guard let found = await withDeadline(60, { await Log.attempt("List items", { try await Brain.actions(lines: recent, start: start, background: notesOnly) }) }) else {
             Log.error("Couldn't find list items in a conversation")
+            // The rules' to-dos and shopping waited for this (see instantActions): not lost with it.
+            if let c = conversation(id) { await suggest(for: c, found: ruleActions(c)) }
             return
         }
         guard let c = conversation(id) else { return }
@@ -1236,10 +1254,14 @@ actor Pipeline {
             modelContext.insert(item)
         }
         try? modelContext.save()
-        guard !fresh.isEmpty else { return }
+        // A later one replaces it, so it lists everything from this conversation still waiting,
+        // not only what was just heard.
+        let waiting = (try? modelContext.fetch(FetchDescriptor<ActionItem>(
+            predicate: #Predicate { $0.conversationID == cid && $0.status == "suggested" }, sortBy: [SortDescriptor(\.created)]))) ?? []
+        guard !waiting.isEmpty else { return }
         let content = UNMutableNotificationContent()
-        content.title = "WTF heard \(fresh.count) thing\(fresh.count == 1 ? "" : "s") to act on"
-        content.body = fresh.prefix(3).map(\.title).joined(separator: ", ")
+        content.title = "WTF heard \(waiting.count) thing\(waiting.count == 1 ? "" : "s") to act on"
+        content.body = waiting.prefix(3).map(\.title).joined(separator: ", ") + (waiting.count > 3 ? " + \(waiting.count - 3) more" : "")
         // One per conversation (a later one replaces it), so it goes when the conversation does (forget).
         try? await UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: Self.heardNotice(c.id), content: content, trigger: nil))
     }

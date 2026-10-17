@@ -140,6 +140,16 @@ final class UnderstandingTests: XCTestCase {
         XCTAssertEqual(CalendarCheck.check(title: "Dinner with Sarah", start: at(16, 0), allDay: true, against: busy, calendar: cal), .alreadyThere)
     }
 
+    func testTheSpokenRecapSaysTheLatestWordsMayBeMine() {
+        let mixed = "[10:00:00] You: shall we go\n[10:00:05] Sam: maybe later\n[10:00:09] Speech: I was going to say"
+        XCTAssertTrue(Prompts.spoken(transcript: mixed, topic: nil, leftAt: nil, now: Date()).contains("may well be mine"))
+        // Sorted by voice to the end, or never sorted at all: nothing to say.
+        let sorted = "[10:00:00] You: shall we go\n[10:00:05] Sam: maybe later"
+        XCTAssertFalse(Prompts.spoken(transcript: sorted, topic: nil, leftAt: nil, now: Date()).contains("may well be mine"))
+        let unsorted = "[10:00:00] Speech: shall we go\n[10:00:05] Speech: maybe later"
+        XCTAssertFalse(Prompts.spoken(transcript: unsorted, topic: nil, leftAt: nil, now: Date()).contains("may well be mine"))
+    }
+
     func testAVeryLongLineStillReachesThePrompt() {
         let monologue = "[10:00:00] You: " + (1...600).map { "word\($0)" }.joined(separator: " ") + " and the end."
         let t = Prompts.tail(monologue, budget: 200)

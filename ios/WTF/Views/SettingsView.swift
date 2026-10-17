@@ -26,6 +26,8 @@ struct SettingsView: View {
     @AppStorage("useCalendar") private var useCalendar = false
     @AppStorage("airPodsMic") private var airPodsMic = false
     @State private var accessProblem: String?
+    /// Which access the note is about (true for Contacts), so coming back with it granted turns the switch on.
+    @State private var accessFor: Bool?
     @AppStorage("parakeet") private var betterOn = false
     @AppStorage("parakeetDownloaded") private var betterDownloaded = false
     /// Why the Better Accuracy download didn't finish, so the row says more than "Try Again".
@@ -319,6 +321,14 @@ struct SettingsView: View {
     private func checkPermissions() async {
         activitiesOff = !ListeningActivity.allowed
         notificationsOff = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus == .denied
+        // Access refused earlier, then given in iOS Settings: iOS doesn't relaunch the app for that.
+        if let contacts = accessFor, contacts ? PersonalWords.contactsAllowed : PersonalWords.calendarAllowed {
+            if contacts { useContacts = true } else { useCalendar = true }
+            accessProblem = nil
+            accessFor = nil
+            PersonalWords.forget()
+            model.processNow()
+        }
     }
 
     private static func days(_ n: Int) -> String { n == 1 ? "1 day" : "\(n) days" }
@@ -342,6 +352,7 @@ struct SettingsView: View {
     /// Turning Contacts or Calendar on asks iOS for access first.
     private func allow(_ on: Bool, contacts: Bool) {
         accessProblem = nil
+        accessFor = nil
         guard on else {
             if contacts { useContacts = false } else { useCalendar = false }
             PersonalWords.forget()
@@ -353,6 +364,7 @@ struct SettingsView: View {
             PersonalWords.forget()
             if !granted {
                 accessProblem = "WTF wasn\u{2019}t given access. Turn it on in Settings › Privacy & Security › \(contacts ? "Contacts" : "Calendars") › WTF."
+                accessFor = contacts
             }
             model.processNow()
         }
@@ -581,6 +593,9 @@ struct AcknowledgementsView: View {
         Credit(name: "fastcluster", use: "Groups similar voices, for Tell Voices Apart.",
                licence: "BSD 2-Clause", link: URL(string: "https://github.com/fastcluster/fastcluster")!,
                notice: fastclusterNotice),
+        Credit(name: "Silero VAD", use: "Tells speech from other sounds while WTF listens, converted for Core ML by FluidInference.",
+               licence: "MIT License", link: URL(string: "https://github.com/snakers4/silero-vad")!,
+               notice: sileroNotice),
     ]
 
     /// Its licence asks for the notice to be reproduced with the app, so it's here word for word.
@@ -596,6 +611,17 @@ struct AcknowledgementsView: View {
           * Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
 
         THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+        """
+
+    /// The MIT licence also asks for its notice to go with the app.
+    private static let sileroNotice = """
+        Copyright (c) 2020-present Silero Team
+
+        Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+        The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+        THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         """
 
     var body: some View {
@@ -618,6 +644,7 @@ struct AcknowledgementsView: View {
                 Link("Apache License 2.0", destination: URL(string: "https://www.apache.org/licenses/LICENSE-2.0")!)
                 Link("CC BY 4.0", destination: URL(string: "https://creativecommons.org/licenses/by/4.0/")!)
                 Link("BSD 2-Clause", destination: URL(string: "https://opensource.org/license/bsd-2-clause")!)
+                Link("MIT License", destination: URL(string: "https://opensource.org/license/mit")!)
             } header: {
                 Text("Licences")
             } footer: {

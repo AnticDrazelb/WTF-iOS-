@@ -75,7 +75,6 @@ struct RootView: View {
         }
         // Black and white throughout; colour only where it means something (switches, deleting).
         .tint(.primary)
-        .sensoryFeedback(.selection, trigger: model.tab)
         .sheet(isPresented: Binding(get: { !welcomed }, set: { if !$0 { welcomed = true } })) {
             WelcomeSheet { welcomed = true }
                 .interactiveDismissDisabled()
@@ -199,6 +198,8 @@ struct ListeningButton: View {
             .foregroundStyle(.primary)
             .padding(.horizontal, 4)
         }
+        // Just the words: otherwise the symbol's name is read out before them.
+        .accessibilityLabel(model.recording ? (model.paused ? "Paused" : "Listening") : model.isStarting ? starting : "Listen")
         .accessibilityHint(model.recording ? (model.paused ? "Shows options to stop listening" : "Stops listening") : model.isStarting ? "Cancels starting" : "Starts listening")
         .sensoryFeedback(.impact(weight: .medium), trigger: model.recording)
     }

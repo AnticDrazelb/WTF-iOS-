@@ -125,6 +125,13 @@ public enum ListAnswers {
     /// nor any "buy": "What should I buy Mum?" is about a present, not the list.
     static let shopping = Rx(#"\b((need|needs|have|got|left|anything|things|stuff) to buy|shopping|groceries|supermarket|(pick up|get) (from|at) the (shop|shops|supermarket)|need from the shops?)\b"#)
     static let events = Rx(#"\b(appointments?|calendar|meetings?|what'?s on|plans|schedule|diary|booked)\b"#)
+    /// Words that ask what's coming up, not about one thing on it.
+    static let eventWords: Set<String> = ["appointment", "appointments", "meeting", "meetings", "calendar", "diary", "schedule", "plans",
+                                          "booked", "coming", "upcoming", "soon", "today", "tonight", "tomorrow", "week", "weeks", "weekend",
+                                          "fortnight", "month", "next", "any", "anything", "else", "got", "there", "are", "what's", "whats",
+                                          "when's", "for", "all", "left", "morning", "afternoon", "evening", "day", "days", "monday",
+                                          "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "i've", "we've", "can", "please",
+                                          "show", "check", "look", "like", "looking", "rest"]
     static let todos = Rx(#"\b(to-?dos?|tasks|need to do|have to do|promised|promise)\b"#)
     static let allLists = Rx(#"\bmy lists?\b|\bon (my|the) lists?\b"#)
     /// Something for someone in particular ("promised Tom", "buy Mum"): the list doesn't say who.
@@ -177,7 +184,9 @@ public enum ListAnswers {
                          heard.isEmpty ? nil : notAdded + "\n" + lines(heard)].compactMap { $0 }
             return parts.isEmpty ? "Nothing on your lists." : parts.joined(separator: "\n\n")
         }
-        if events.test(q) { return coming("No \(when) on your list.") }
+        // Not one plan in particular ("What's the meeting with the bank about?", "Is the restaurant
+        // booked?"): what was said about it is in the conversations.
+        if events.test(q), Set(Prompts.keywords(q)).subtracting(eventWords).isEmpty { return coming("No \(when) on your list.") }
         return nil
     }
 }

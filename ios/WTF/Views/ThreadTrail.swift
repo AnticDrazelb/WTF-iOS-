@@ -14,7 +14,7 @@ struct ThreadTrail: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
                     ForEach(Array(threads.enumerated()), id: \.element.id) { i, t in
-                        if i > 0 { Image(systemName: "chevron.compact.right").foregroundStyle(.tertiary) }
+                        if i > 0 { Image(systemName: "chevron.compact.right").foregroundStyle(.tertiary).accessibilityHidden(true) }
                         Button { onTap(t) } label: { ThreadChip(thread: t) }
                             .buttonStyle(.plain)
                             .disabled(model.status != nil)
@@ -26,7 +26,6 @@ struct ThreadTrail: View {
             .onAppear { proxy.scrollTo(threads.last?.id, anchor: .trailing) }
             .onChange(of: threads.count) { withAnimation(.snappy) { proxy.scrollTo(threads.last?.id, anchor: .trailing) } }
         }
-        .sensoryFeedback(.impact(weight: .light), trigger: threads.count)
     }
 }
 

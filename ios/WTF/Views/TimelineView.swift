@@ -44,13 +44,20 @@ struct TimelineView: View {
         return out
     }
 
+    /// While listening, each pause leaves one recording to transcribe for a few seconds: only
+    /// shown once there's a queue, so the list doesn't jump after every sentence.
+    private var showsTranscribing: Bool {
+        (!model.recording && (!pending.isEmpty || model.transcribing != nil))
+            || pending.count > 1 || (model.transcribing?.total ?? 0) > 1
+    }
+
     private var searching: Bool { query.trimmingCharacters(in: .whitespaces).count >= 2 }
 
     var body: some View {
         @Bindable var model = model
         NavigationStack(path: $model.timelinePath) {
             List {
-                if !pending.isEmpty || model.transcribing != nil {
+                if showsTranscribing {
                     Section { TranscribingRow(pending: pending.count) }
                 }
                 ForEach(byDay, id: \.day) { day, header, list in
@@ -108,7 +115,7 @@ struct TimelineView: View {
             }
             .listStyle(.plain)
             .overlay {
-                if conversations.isEmpty && pending.isEmpty {
+                if conversations.isEmpty && !showsTranscribing {
                     ContentUnavailableView("No Conversations", systemImage: "waveform",
                                            description: Text(model.recording ? "Your conversations will appear here once WTF has heard some talking." : "Turn on listening and your conversations will appear here."))
                 } else if !query.isEmpty && shown.isEmpty {
@@ -131,7 +138,7 @@ struct TimelineView: View {
             // carry on afterwards, so the spinner doesn't wait a minute for them.
             .refreshable {
                 Recorder.shared.flush()
-                await model.pipeline.catchUp()
+                await model.pipeline.catchUp(force: true)
                 model.processNow()
             }
             .navigationTitle("Timeline")
@@ -164,6 +171,7 @@ struct TranscribingRow: View {
         HStack(spacing: 12) {
             Image(systemName: "hourglass").foregroundStyle(.secondary)
                 .frame(width: 29, height: 29)
+                .accessibilityHidden(true)
             if let p = model.transcribing {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(p.total > 1 ? "Transcribing \(p.done + 1) of \(p.total)\u{2026}" : "Transcribing\u{2026}")
@@ -173,7 +181,7 @@ struct TranscribingRow: View {
                 Text("\(pending) recording\(pending == 1 ? "" : "s") still to transcribe")
                 Spacer()
                 // A capsule, so it doesn't read as part of the sentence beside it.
-                Button("Transcribe Now") { model.processNow() }
+                Button("Transcribe Now") { model.processNow(force: true) }
                     .buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small)
                     .sensoryFeedback(.selection, trigger: model.transcribing != nil)
             }
@@ -340,6 +348,9 @@ struct ConversationView: View {
                     Text("\(dayLabel(conversation.start)), \(conversation.start.formatted(date: .omitted, time: .shortened))\u{2013}\(conversation.end.formatted(date: .omitted, time: .shortened))")
                         .font(.subheadline).foregroundStyle(.secondary)
                 }
+                // The page's only title (the bar's is blank), so VoiceOver can find it as one.
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(.isHeader)
                 .listRowBackground(Color.clear)
             }
             if let summary = conversation.summary, !summary.isEmpty {

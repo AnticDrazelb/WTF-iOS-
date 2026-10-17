@@ -245,7 +245,12 @@ public enum WhenParser {
         if let m = Rx(#"(?<!\b(?:no|the|this|that|which|any) )\b"# + num + #"\s+(?:tonight|this evening|in the evening)\b"#).first(q), (1...12).contains(n(m[1])) {
             return (adjust(n(m[1])) % 24, 0)
         }
-        if let m = Rx(#"\b(?:at|for|from|by)\s+"# + num + #"\b(?!\s*(?:st|nd|rd|th|minutes|mins|people|of))"#).first(q) {
+        // "At seven thirty": the minutes said as a word.
+        if let m = Rx(#"\b(?:at|for|from|by)\s+"# + num + #"\s+(fifteen|thirty|forty[- ]five)\b"#).first(q), (1...12).contains(n(m[1])) {
+            return (adjust(n(m[1])) % 24, m[2] == "fifteen" ? 15 : m[2] == "thirty" ? 30 : 45)
+        }
+        // Not "for 2 minutes", "for 6 people" or "for one thing"; but "at 3 then" and "at 3 Thursday" are times.
+        if let m = Rx(#"\b(?:at|for|from|by)\s+"# + num + #"\b(?!(?:st|nd|rd|th)\b|\s*(?:minutes|mins|hours|hrs|days|nights|weeks|people|of|things?|stage)\b)"#).first(q) {
             let h = n(m[1])
             if (1...12).contains(h) { return (adjust(h) % 24, 0) }
         }

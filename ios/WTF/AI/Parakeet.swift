@@ -63,7 +63,7 @@ actor Parakeet {
         if let progress { watching.add(progress) }
         self.watching = watching
         let job = Task { () throws -> AsrManager in
-            let models = try await AsrModels.downloadAndLoad(version: .v2, progressHandler: { p in watching.send(p.fractionCompleted) })
+            let models = try await AsrModels.downloadAndLoad(version: .v2, progressHandler: { p in watching.send(p) })
             let m = AsrManager(config: .default)
             try await m.loadModels(models)
             return m
@@ -163,10 +163,16 @@ actor Parakeet {
 
     /// How far the download's got, passed on to everyone waiting on it, the ones who asked later
     /// told where it's got to so far.
+    ///
+    /// FluidAudio reports each model file on its own, 0–0.5 downloading then 0.5–1 compiling, and
+    /// starts again for the next. Everything's downloaded before the first compile, so that half
+    /// is shown as the whole download, and from the first compile on it's 1 (Settings shows
+    /// "Preparing…"), never going back.
     private final class Watchers: @unchecked Sendable {
         private let lock = NSLock()
         private var handlers: [@Sendable (Double) -> Void] = []
         private var last: Double?
+        private var preparing = false
 
         func add(_ handler: @escaping @Sendable (Double) -> Void) {
             lock.lock()
@@ -176,8 +182,10 @@ actor Parakeet {
             if let last { handler(last) }
         }
 
-        func send(_ fraction: Double) {
+        func send(_ progress: DownloadProgress) {
             lock.lock()
+            if case .compiling = progress.phase { preparing = true }
+            let fraction = preparing ? 1 : max(last ?? 0, min(1, progress.fractionCompleted / 0.5))
             last = fraction
             let all = handlers
             lock.unlock()

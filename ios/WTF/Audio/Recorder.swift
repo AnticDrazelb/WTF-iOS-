@@ -23,6 +23,8 @@ final class Recorder: @unchecked Sendable {
     var onDiscard: ((Date) -> Void)?
     /// Recordings can't be saved (the iPhone's full, say): told at most every ten minutes.
     var onProblem: ((Error) -> Void)?
+    /// Recordings save again after [onProblem]: its note no longer stands.
+    var onRecovered: (() -> Void)?
 
     /// A new one for every start (see freshEngine). Swapped only with [sessionLock] held, and
     /// under [infoLock] too, for [stalled] to read from anywhere.
@@ -490,6 +492,11 @@ final class Recorder: @unchecked Sendable {
                 onProblem?(error)
             }
             return
+        }
+        if openFailedAt != .distantPast {
+            // Space has been freed: said at once if it fills up again.
+            openFailedAt = .distantPast; openToldAt = .distantPast
+            onRecovered?()
         }
         writeFailed = false
         chunkStart = now.addingTimeInterval(-Double(preRoll.count) * 0.03)

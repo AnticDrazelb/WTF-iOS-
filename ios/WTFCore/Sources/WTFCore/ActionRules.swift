@@ -64,8 +64,9 @@ public enum ActionRules {
         Rx(#"\b(?:buy|grab|pick up)\s+"# + item + itemEnd),
         Rx(#"\b(?:run(?:ning)? out of|ran out of|out of|we've got no|we have no|there's no)\s+"# + item + itemEnd),
         Rx(#"\bneed (?:some|more)\s+"# + item + itemEnd),
-        // "we need batteries for the remote", "the remote needs new batteries"
-        Rx(#"\b(?:we|i) need (?:new |a new |an? )?(?!to\b)"# + item + itemEnd),
+        // "we need batteries for the remote", "the remote needs new batteries"; not "I need a minute"
+        // or "I need the loo": one thing needed is rarely shopping unless it's a new one.
+        Rx(#"\b(?:we|i) need (?:new |a new )?(?!(?:to|an?|the)\b)"# + item + itemEnd),
         Rx(#"\bneeds (?:new |some |more |a new )\s*"# + item + itemEnd),
     ]
     static let notItems: Set<String> = [
@@ -92,6 +93,12 @@ public enum ActionRules {
         // Someone's own things: "grab your coat".
         "your", "my", "his", "our", "their", "yourself", "myself",
     ]
+    /// Time and a break, not shopping: "I need a minute", "I ran out of patience", "grab a nap".
+    /// Only as the thing itself, so "toilet roll", "shower gel" and "bath towels" are still shopping.
+    static let notBoughtLast: Set<String> = [
+        "minute", "minutes", "second", "seconds", "sec", "moment", "patience", "nap", "holiday", "wee", "loo", "toilet",
+        "cuppa", "favour", "plan", "shower", "bath", "walk",
+    ]
     /// Collecting someone, not buying something: "pick up Ezra from school", "collect the kids from nursery".
     static let collecting = Rx(#"\b(?:pick|picking|collect|collecting|fetch|fetching)\b.{0,40}\bfrom (?:school|nursery|pre-?school|college|uni|university|work|the station|the airport|practice|training|football|swimming|club|cubs|scouts|brownies|ballet|the party|(?:his|her|their|your|my) (?:mum|mom|dad|nan|gran|grandma|grandad|friend)'?s?)\b"#)
 
@@ -107,7 +114,11 @@ public enum ActionRules {
         #"(go|head|come|get|set|leave|make a move)( (off|now|home|out|back|in|up|down|away|on|along|over|then|too|first|to bed|to sleep|with you))*$|"# +
         #"(talk|speak|catch|chat) (to |with )?(you|ya)\b|show you\b|wait (for you|here|there|outside|and see)\b|"# +
         // Ordering food: "I'll have the chicken".
-        #"have (the|a|an|some) [a-z]+( please)?$)"#)
+        #"have (the|a|an|some) [a-z]+( please)?$|"# +
+        // Everyday doings at home: "I'll put the kettle on", "I'm going to sit down", "I need to go to the loo".
+        #"(put|get|stick) the kettle on\b|(have|make|get) (a|another) (cup of tea|cup of coffee|cuppa|tea|coffee|brew)\b|"# +
+        #"(sit|lie|calm) down\b|lose (my|the) (mind|plot|rag|temper)\b|(go|nip) (to )?(the )?(toilet|loo|bathroom)\b|"# +
+        #"go for a wee\b|have a (wee|nap|lie down|sit down|shower|bath)\b)"#)
     /// Talk about what's already happened: "the meeting on Monday went well", "her birthday was on the 3rd".
     static let pastTense = Rx(
         #"\b(was|were|went|had|did|been|yesterday|ago|last (monday|tuesday|wednesday|thursday|friday|saturday|sunday|week|weekend|night|month|year))\b"#)
@@ -124,6 +135,8 @@ public enum ActionRules {
     static let bogusEventTitle = Rx(#"^(discuss|discussing|talk|talking|chat|conversation|meeting for .* link)"#)
     static let vagueWhen = Rx(#"any ?time|unspecified|not (specified|said|given)|unknown|^\s*(nothing|none|n/?a|later|soon|sometime|some time|eventually)\s*$"#)
     static let clauses = Rx(#"[.?!;]\s+|,?\s+and then\s+|,\s+then\s+"#)
+    /// Making a cuppa isn't shopping: "let me get the kettle on".
+    static let kettleOn = Rx(#"\bkettle on\b"#)
     /// Eating out isn't shopping: "grab some Chinese food from a restaurant".
     static let eatingOut = Rx(#"\b(restaurant|takeaway|take-away|takeout|chippy|caf[eé]|pub|bar|drive-?thru|deliveroo|just eat|uber eats|order in|eat out|eating out)\b"#)
     static let buyTodo = Rx(
@@ -249,13 +262,14 @@ public enum ActionRules {
             let reference = heard[index] ?? conversationStart
             let next = index + 1 < lines.count ? text(lines[index + 1]) : ""
             // Clause by clause, so "go to the pub and then get some milk" still finds the milk.
-            for clause in clauses.split(t) where !eatingOut.test(clause) && !collecting.test(clause) {
+            for clause in clauses.split(t) where !eatingOut.test(clause) && !collecting.test(clause) && !kettleOn.test(clause) {
                 for (r, rule) in buyRules.enumerated() {
                     for m in rule.all(clause) {
                         // "pick up Ezra": a name with no "some" or "the" before it is someone.
                         if r == 1, isCollecting(m[1], in: [clause]) { continue }
                         for it in splitItems(m[1]) where it.count >= 2 && it.count <= 40 &&
-                            !it.split(separator: " ").contains(where: { notItems.contains($0.lowercased()) || notBought.contains($0.lowercased()) }) {
+                            !it.split(separator: " ").contains(where: { notItems.contains($0.lowercased()) || notBought.contains($0.lowercased()) }) &&
+                            !notBoughtLast.contains(it.split(separator: " ").last.map { $0.lowercased() } ?? "") {
                             out.append(ExtractedAction(type: .buy, title: capitalised(it), source: line))
                         }
                     }
@@ -270,7 +284,9 @@ public enum ActionRules {
                     task = Rx(#"\byou\b"#, caseSensitive: true).replace(task, with: v[1])
                 }
                 task = specific(task, in: t)
-                if !buyRules.contains(where: { $0.test("I'll " + task) }) && !vagueTask.test(task) && !chatter.test(task) {
+                // "I'll check.", "I'm going to the shop": one word or no verb isn't a task.
+                let verbless = task.split(separator: " ").count < 2 || Rx(#"^(the|to the|a|an)\b"#).test(task.lowercased())
+                if !verbless && !buyRules.contains(where: { $0.test("I'll " + task) }) && !vagueTask.test(task) && !chatter.test(task) {
                     out.append(ExtractedAction(type: .todo, title: capitalised(task), source: line))
                 }
             }

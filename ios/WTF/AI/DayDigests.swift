@@ -81,7 +81,11 @@ final class DayDigests {
     }
 
     private func save() {
-        let since = Self.key(Date().addingTimeInterval(-60 * 86_400))
+        // As long as Keep Transcripts (and two months at least): a day still in the Timeline
+        // shouldn't have its recap written again every time it's opened.
+        let set = UserDefaults.standard.integer(forKey: "keepDays")
+        let days = max(60, set == 0 ? 7 : set)
+        let since = Self.key(Date().addingTimeInterval(-Double(days) * 86_400))
         kept = kept.filter { $0.key >= since } // "yyyy-MM-dd" sorts as the days do
         guard let data = try? JSONEncoder().encode(kept) else { return }
         let file = Self.file

@@ -9,7 +9,10 @@ public enum Prompts {
     static let commitment = Rx(#"promis|said i'?d|i said i would|to-?do|commit|agreed to|supposed to|\bowe\b|need to do|have to do"#)
     static let digest = Rx(#"summar|recap|my day|overview|what did i do\b(?!\s+(with|about))|what have i (done|been doing)|everything"#)
     /// Not any "just" or "where was I with…": "I just can't remember Tom's address" is a question of its own.
-    static let latest = Rx(#"\b(what|where) (was|were|did) (i|we|he|she|they) just\b|\b(i|we) (was|were) just (saying|talking|on)\b|\bjust (now|said|saying)\b|a (minute|moment|sec|second)s? ago|where was i\b(?!\s+with)|lost (my|the) (train|thread)|\bon about\b|what was i (just )?(saying|talking|on)|where were we|what were we (just )?(saying|talking|on)|remind me what (i|we) (was|were) (saying|talking)|last thing (i|we) said|^\W*wtf\W*$|\bwtf (was|were) (that|i|we)\b"#)
+    static let latest = Rx(#"\b(what|where) (was|were|did) (i|we|he|she|they) just\b|\b(i|we) (was|were) just (saying|talking|on)\b|\bjust (now|said|saying)\b|a (minute|moment|sec|second)s? ago|where was i\b(?!\s+with)|lost (my|the) (train|thread)|where were we|last thing (i|we) said|^\W*wtf\W*$|\bwtf (was|were) (that|i|we)\b"#)
+    /// The latest conversation only if nothing else is named: "What was Tom on about?" or "What was
+    /// I saying about the boiler?" is about that, wherever it was said.
+    static let looseLatest = Rx(#"\bon about\b|what was i (saying|talking|on)|what were we (saying|talking|on)|remind me what (i|we) (was|were) (saying|talking)"#)
     /// The latest conversation only if nothing else is named: "What was that conversation with Tom
     /// about?" is about Tom's, wherever it is.
     static let vagueLatest = Rx(#"\b(this|that|the last|the latest) conversation\b|right now|interrupted"#)
@@ -18,15 +21,16 @@ public enum Prompts {
                                            "sec", "ago", "summarise", "summarize", "summary", "recap", "happened", "happen", "going", "again",
                                            "sorry", "wtf", "are", "what's", "who's", "we're", "they're", "i'm", "happening", "being", "for",
                                            "can", "could", "please", "get", "got", "talk", "talked", "chat", "discussed", "discussing", "here", "there",
-                                           "miss", "missed"]
+                                           "miss", "missed", "hell", "heck", "earth", "even", "exactly", "all", "before"]
     static let timeWords = Rx(#"\b(yesterday|this morning|last night|earlier|today|afternoon|evening|lunch|hours? ago)\b"#)
 
     public static func intent(_ question: String) -> RecallIntent {
         let q = plain(question).lowercased()
         if commitment.test(q) { return .commitments }
         // Before the recap: "summarise what we were just talking about" is about the latest talk, not the day.
-        if !timeWords.test(q), latest.test(q) || (vagueLatest.test(q) && Set(keywords(q)).subtracting(askingWords).isEmpty) { return .latest }
-        if digest.test(q) { return .digest }
+        if !timeWords.test(q), latest.test(q) || ((looseLatest.test(q) || vagueLatest.test(q)) && Set(keywords(q)).subtracting(askingWords).isEmpty) { return .latest }
+        // "What happened today?" is the day's recap too, though it doesn't say "summarise".
+        if digest.test(q) || isAboutToday(q) { return .digest }
         return .focused
     }
 
@@ -100,10 +104,16 @@ public enum Prompts {
 
     /// The same, for reading aloud in your ear: one or two short sentences, no lists.
     public static func spoken(transcript: String, topic: String?, leftAt: String?, now: Date, background: String = "", start: Date? = nil) -> String {
-        """
+        let said = tail(TranscriptFormat.compact(transcript), budget: background.isEmpty ? 700 : 550)
+        // Words just heard aren't sorted by voice yet: without this, the AI puts the user's own
+        // newest words down to "someone".
+        let unsorted = said.split(separator: "\n").last?.hasPrefix("\(Labels.anonymous): ") == true
+            ? "\nThe last line, marked \"\(Labels.anonymous)\", is the last few seconds, and whose voice it is isn't known yet: it may well be mine.\n"
+            : ""
+        return """
         \(background)The most recent conversation\(topic.map { " (topic: \($0))" } ?? ""), oldest first; the last line is the most recent:
-        \(tail(TranscriptFormat.compact(transcript), budget: background.isEmpty ? 700 : 550))
-        \(leftAt.map { "\nEarlier, I dropped a topic part-way: \($0)\n" } ?? "")
+        \(said)
+        \(unsorted)\(leftAt.map { "\nEarlier, I dropped a topic part-way: \($0)\n" } ?? "")
         (It's \(clock(now)) now.\(when(start, now: now))) In one or two short sentences that will be read aloud to me, say what I was just \
         talking about and, if I trailed off, what I was in the middle of saying. No lists, no quotation marks.
         """
