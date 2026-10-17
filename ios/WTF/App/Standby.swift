@@ -62,10 +62,12 @@ final class Standby {
             Log.info("Action button: the answer kept ready was up to date")
             return ready.text
         }
+        // Not as a stand-in either once it's that old: its "just" would be wrong.
+        let keptFresh = ready.map { Date().timeIntervalSince($0.made) < 600 } ?? false
         if let fresh = await model.workOutRecap(live: live, ai: 3.5) {
-            if fresh.byAI || ready == nil || !live.isEmpty { return fresh.text }
+            if fresh.byAI || !keptFresh || !live.isEmpty { return fresh.text }
         }
-        if let ready { return ready.text }
+        if let ready, keptFresh { return ready.text }
         return model.recording ? "I haven't heard anything yet." : "I'm not listening at the moment. Open WTF to turn listening on."
     }
 }
