@@ -32,7 +32,11 @@ actor Pipeline {
         toFollow = []
         // Nor are its words kept to answer from (the Action button reads the last few seconds).
         LiveTranscriber.shared.forget()
+        // A retry from an earlier conversation, still waiting (see transcribePending), is kept:
+        // only what could have joined this one goes (drop(spans:) sees to its own retries).
+        let since = (latestConversation()?.start ?? .distantPast).addingTimeInterval(-Double(gapMinutes * 60))
         for chunk in (try? modelContext.fetch(FetchDescriptor<Chunk>(predicate: #Predicate { $0.status == "pending" }))) ?? [] {
+            guard chunk.attempts == 0 || chunk.end >= since else { continue }
             if let path = chunk.path { try? FileManager.default.removeItem(atPath: path) }
             modelContext.delete(chunk)
         }
@@ -78,10 +82,12 @@ actor Pipeline {
     private func gone(_ chunk: Chunk) -> Bool { chunk.isDeleted || chunk.modelContext == nil }
 
     /// Transcribes what's waiting, so a question includes the latest words. Summaries can wait.
+    /// [force]: asked for (Transcribe Now, pull to refresh), so one that failed is tried now too,
+    /// rather than the button doing nothing while it waits.
     @discardableResult
-    func catchUp() async -> Bool {
+    func catchUp(force: Bool = false) async -> Bool {
         let before = transcribing
-        let job = Task { _ = await before?.value; return await self.transcribePending() }
+        let job = Task { _ = await before?.value; return await self.transcribePending(force: force) }
         transcribing = job
         return await job.value
     }
@@ -90,14 +96,14 @@ actor Pipeline {
     /// while, longer each time, not on every recording ahead of what's just been said.
     private var lastTried: [String: Date] = [:]
 
-    private func transcribePending() async -> Bool {
+    private func transcribePending(force: Bool = false) async -> Bool {
         let now = Date()
         let all = (try? modelContext.fetch(FetchDescriptor<Chunk>(
             predicate: #Predicate { $0.status == "pending" }, sortBy: [SortDescriptor(\.start)]))) ?? []
         // New ones first; one that failed waits its turn after them.
         let pending = all.filter { $0.attempts == 0 } + all.filter { chunk in
             guard chunk.attempts > 0 else { return false }
-            guard let path = chunk.path, let tried = lastTried[path] else { return true }
+            guard !force, let path = chunk.path, let tried = lastTried[path] else { return true }
             return now > tried.addingTimeInterval(60 * pow(2, Double(chunk.attempts)))
         }
         guard !pending.isEmpty, await SpeechEngine.shared.isReady() else { return pending.count == all.count }
@@ -201,10 +207,10 @@ actor Pipeline {
     }
 
     /// Catch up and follow the topic, then (in the background, without waiting) summarise
-    /// conversations that have gone quiet and tidy away old ones.
-    func run() async {
+    /// conversations that have gone quiet and tidy away old ones. [force]: see catchUp.
+    func run(force: Bool = false) async {
         await refreshVocabulary()
-        await catchUp()
+        await catchUp(force: force)
         let trail = following
         let follow = Task { await trail?.value; await self.followThreads() }
         following = follow
