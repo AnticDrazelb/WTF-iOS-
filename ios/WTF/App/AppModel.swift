@@ -149,7 +149,8 @@ final class AppModel {
             // The microphone's back, so Ask's "listening stopped" note no longer stands.
             Task { @MainActor in
                 AppModel.shared.paused = false
-                if AppModel.shared.recording { AppModel.shared.problem = AppModel.shared.noProblem }
+                // Not the free-space note: the microphone coming back doesn't make room to save.
+                if AppModel.shared.recording, AppModel.shared.problem != AppModel.noSpaceNote { AppModel.shared.problem = AppModel.shared.noProblem }
             }
         }
         Recorder.shared.onStopped = { [weak self] in
@@ -253,7 +254,7 @@ final class AppModel {
                 return false
             }
             paused = false
-            problem = noProblem
+            if problem != Self.noSpaceNote { problem = noProblem }
             Self.withdrawPausedNotice()
             // iOS ends the card after about 8 hours, and it can be swiped away: back it comes.
             ListeningActivity.shared.restoreIfNeeded()
@@ -774,6 +775,36 @@ final class AppModel {
                     if Task.isCancelled { return }
                 }
             }
+            // "What did I say I'd do today?": what's still on the list and every to-do noted in
+            // today's conversations, not the one conversation that best matches "I'd".
+            if focus == nil, intent == .commitments, Self.saysToday.test(Prompts.plain(q)) {
+                let today = Calendar.current.startOfDay(for: now)
+                let all = (try? container.mainContext.fetch(FetchDescriptor<Conversation>(predicate: #Predicate { $0.start >= today }, sortBy: [SortDescriptor(\.start)]))) ?? []
+                let listed = openItems().filter { $0.type == .todo && !$0.suggested }.map(\.title)
+                let onList = Set(listed.map { $0.lowercased() })
+                let said = DayReview.gather(all.map(\.dayNote), limit: 99) { $0.todo }.map { $0.text }.filter { !onList.contains($0.lowercased()) }
+                func bullets(_ lines: [String]) -> String { lines.map { "\u{2022} \($0)" }.joined(separator: "\n") }
+                var parts: [String] = []
+                if !listed.isEmpty { parts.append("Still to do:\n" + bullets(listed)) }
+                if !said.isEmpty { parts.append("Said today:\n" + bullets(said)) }
+                about.formUnion(all.map(\.id))
+                drawsOn(about, question: asked.id)
+                if !parts.isEmpty { add(ChatMessage(fromUser: false, text: parts.joined(separator: "\n\n"))) }
+                // The conversation going on (or just ended) isn't written up yet, so its to-dos
+                // aren't noted: the AI reads its words for them.
+                if Brain.notReadyReason == nil, let last = all.last, (last.title ?? "").isEmpty, !last.transcript.isEmpty {
+                    let label = last.start.formatted(date: .omitted, time: .shortened)
+                    let notes: [(label: String, title: String?, summary: String?)] = [(label: label, title: nil, summary: nil)]
+                    await answer(Prompts.focused(question: q, notes: notes, best: (label: label, transcript: last.transcript), now: now),
+                                 hasFallback: !parts.isEmpty)
+                    return
+                }
+                if parts.isEmpty {
+                    add(ChatMessage(fromUser: false, text: all.isEmpty && !recording ? "I haven't heard anything today yet. Turn on listening and I'll keep track."
+                                        : "Nothing on your to-do list, and nothing you said you'd do today."))
+                }
+                return
+            }
             let latest = await pipeline.latestConversation()
             if focus == nil, intent == .latest {
                 guard let latest else {
@@ -855,6 +886,8 @@ final class AppModel {
     }
     private static let followOn = Rx(#"^\s*(and|but|so|what about|how about)\b"#)
     private static let pointsBack = Rx(#"\b(she|he|her|him|his|they|them|their|it|its|that|those|then|there)\b"#)
+    /// A question about what you said you'd do that's about today only (see ask).
+    private static let saysToday = Rx(#"\btoday\b"#)
 
     /// Said when catching up on the last few seconds takes too long (not an answer to follow on from).
     private static let stillTranscribing = "The last few seconds are still being transcribed, so this may miss them."

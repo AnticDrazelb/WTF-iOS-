@@ -1,6 +1,7 @@
 import ActivityKit
 import Foundation
 import UIKit
+import UserNotifications
 import WTFCore
 
 /// Keeps the Live Activity in step with listening and the thread map.
@@ -30,6 +31,8 @@ final class ListeningActivity {
         // quarter of an hour over nothing. Waited for (briefly), as WTF's about to be gone; not
         // through stop(), whose tasks need the main thread, which is the one waiting here.
         NotificationCenter.default.addObserver(forName: UIApplication.willTerminateNotification, object: nil, queue: nil) { _ in
+            // Its end isn't iOS taking the card away, so no notice says WTF's still listening.
+            MainActor.assumeIsolated { ListeningActivity.shared.stateWatch?.cancel() }
             let done = DispatchSemaphore(value: 0)
             Task.detached {
                 for card in Activity<ListeningAttributes>.activities { await card.end(nil, dismissalPolicy: .immediate) }
@@ -69,8 +72,8 @@ final class ListeningActivity {
         // iOS only lets a card start from the app in front (or a button's intent): from the
         // background it says no, so not every new topic tries again.
         if often {
-            // Not at all from the background: iOS says no, and trying would only take away the
-            // ended card still on the Lock Screen. The next time WTF comes forward does it.
+            // Not at all from the background: iOS says no (see watch). The next time WTF comes
+            // forward does it.
             guard UIApplication.shared.applicationState != .background,
                   Date().timeIntervalSince(lastRestore) > 60 else { return }
             lastRestore = Date()
@@ -92,7 +95,10 @@ final class ListeningActivity {
         // as a second pill. Ended only once there's a new one: if iOS says no, they stay.
         let olds = Activity<ListeningAttributes>.activities
         do {
-            activity = try Activity.request(attributes: ListeningAttributes(), content: ActivityContent(state: state, staleDate: Self.fresh))
+            let card = try Activity.request(attributes: ListeningAttributes(), content: ActivityContent(state: state, staleDate: Self.fresh))
+            activity = card
+            watch(card)
+            Self.withdrawGoneNotice()
             for old in olds {
                 Task { await old.end(nil, dismissalPolicy: .immediate) }
             }
@@ -115,10 +121,45 @@ final class ListeningActivity {
     /// stops saying "Recording" after this.
     private static var fresh: Date { Date().addingTimeInterval(15 * 60) }
     private var heartbeat: Task<Void, Never>?
+    private var stateWatch: Task<Void, Never>?
+
+    /// iOS ends the card after about 8 hours (or it's swiped away) while WTF carries on listening
+    /// in the background, where it can't start another. Left up, the ended card freezes and soon
+    /// says "Not listening" with the microphone still on: so it goes at once, and from the
+    /// background a quiet notice says WTF is still listening. The next time WTF comes forward,
+    /// restoreIfNeeded brings the card back.
+    private func watch(_ card: Activity<ListeningAttributes>) {
+        stateWatch?.cancel()
+        stateWatch = Task { [weak self] in
+            for await phase in card.activityStateUpdates {
+                guard phase == .ended || phase == .dismissed else { continue }
+                guard let self, self.activity?.id == card.id, AppModel.shared.recording else { return }
+                await card.end(nil, dismissalPolicy: .immediate)
+                if !Task.isCancelled, UIApplication.shared.applicationState == .background {
+                    let content = UNMutableNotificationContent()
+                    content.title = "WTF is still listening"
+                    content.body = "The Lock Screen card has gone. Open WTF to bring it back."
+                    content.interruptionLevel = .passive
+                    try? await UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: Self.goneNotice, content: content, trigger: nil))
+                }
+                return
+            }
+        }
+    }
+
+    private static let goneNotice = "wtf.card.gone"
+
+    /// The notice that the card's gone: wrong once it's back, or listening's stopped.
+    private static func withdrawGoneNotice() {
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [goneNotice])
+    }
 
     func stop() {
         heartbeat?.cancel()
         heartbeat = nil
+        stateWatch?.cancel()
+        stateWatch = nil
+        Self.withdrawGoneNotice()
         activity = nil
         for ending in Activity<ListeningAttributes>.activities {
             Task { await ending.end(nil, dismissalPolicy: .immediate) }

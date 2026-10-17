@@ -68,7 +68,8 @@ public enum WhenParser {
     }
 
     /// [reference]'s wall-clock fields matter, not its zone: pass the conversation's local time.
-    public static func parse(_ phrase: String, reference: DateComponents) -> WhenResult? {
+    /// [about] is what the plan is ("Dinner"), when [phrase] is only the when: dinner at 8 is 8pm.
+    public static func parse(_ phrase: String, reference: DateComponents, about: String = "") -> WhenResult? {
         var q = phrase.lowercased()
         // "Saturday 14th" is Saturday the 14th (not "Saturday 14", which may be a time).
         q = Rx(#"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+(\d{1,2})(st|nd|rd|th)\b"#).replace(q, with: "$1 the $2$3")
@@ -94,7 +95,12 @@ public enum WhenParser {
                 }
             }
         }
-        var time = parseTime(q)
+        // "Next week" with no day said: Monday's a guess, so say so.
+        if doubt == nil, weekday == nil, nextWeek.test(q), !explicitDate.test(q),
+           !Rx(#"\b(today|tonight|tomorrow|tmrw|weekend|a week|this (morning|afternoon|evening))\b"#).test(q) {
+            doubt = "No day said, just next week"
+        }
+        var time = parseTime(q, evening: eveningPlan.test(q + " " + about.lowercased()))
         // A bare "today at 3" that's already passed this morning is probably pm.
         if let t = time, date == today, (t.0 * 60 + t.1) < ((reference.hour ?? 0) * 60 + (reference.minute ?? 0)), t.0 < 12,
            !Rx(#"\bam\b|morning"#).test(q) {
@@ -102,6 +108,11 @@ public enum WhenParser {
         }
         return WhenResult(year: date.y, month: date.m, day: date.d, hour: time?.0, minute: time?.1, doubt: doubt)
     }
+
+    static let nextWeek = Rx(#"\bnext week\b"#)
+    /// Plans that are in the evening unless said otherwise: "dinner at 8" isn't breakfast time.
+    /// Not "tea", which can be either; nor a children's party, often in the morning.
+    static let eveningPlan = Rx(#"\b(dinner|drinks|party|gig|pub|takeaway)\b(?<!\b(?:kids|kids'|children's|child's) party)"#)
 
     /// A day of the month or a month named: "the 1st", "2 November", "November 2", "5/11".
     static let explicitDate: Rx = {
@@ -124,8 +135,8 @@ public enum WhenParser {
         ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][weekday - 1]
     }
 
-    public static func parse(_ phrase: String, reference: Date, calendar: Calendar = .current) -> WhenResult? {
-        parse(phrase, reference: calendar.dateComponents([.year, .month, .day, .hour, .minute], from: reference))
+    public static func parse(_ phrase: String, reference: Date, calendar: Calendar = .current, about: String = "") -> WhenResult? {
+        parse(phrase, reference: calendar.dateComponents([.year, .month, .day, .hour, .minute], from: reference), about: about)
     }
 
     private static func parseDate(_ q: String, today: Day) -> Day? {
@@ -165,7 +176,7 @@ public enum WhenParser {
             return d < today.next(2) ? d.plus(days: 7) : d
         }
         if Rx(#"\b(this )?weekend\b"#).test(q) { return today.next(7, orSame: true) }
-        if Rx(#"\bnext week\b"#).test(q) { return today.next(2) }
+        if nextWeek.test(q) { return today.next(2) }
 
         // "the 24th" / "on the twentieth": this month, or next if it's passed.
         var dayOfMonth: Int? = Rx(#"\bthe\s+(\d{1,2})"# + notACount).first(q).flatMap { Int($0[1]) }
@@ -199,10 +210,13 @@ public enum WhenParser {
         return nil
     }
 
-    private static func parseTime(_ q: String) -> (Int, Int)? {
+    /// [evening]: an evening plan ("dinner", "drinks"), so a bare 8 to 11 is pm unless morning's said.
+    private static func parseTime(_ q: String, evening: Bool = false) -> (Int, Int)? {
         let num = #"(\d{1,2}|"# + numbers.keys.sorted { $0.count > $1.count }.joined(separator: "|") + ")"
         func n(_ s: String) -> Int { Int(s) ?? numbers[s]! }
-        let pm = Rx(#"\bpm\b|afternoon|evening|tonight|night"#).test(q)
+        // Not "I am": only a said time ("8 am") or the morning counts against an evening plan.
+        let pm = Rx(#"\bpm\b|afternoon|evening|tonight|night"#).test(q) ||
+            (evening && !Rx(#"\d\s*am\b|morning|breakfast|brunch"#).test(q))
         let am = Rx(#"\bam\b|morning"#).test(q)
         func adjust(_ h: Int) -> Int {
             if h == 12 { return am && !pm ? 0 : 12 }

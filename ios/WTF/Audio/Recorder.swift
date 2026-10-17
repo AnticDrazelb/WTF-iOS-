@@ -122,7 +122,8 @@ final class Recorder: @unchecked Sendable {
         // Nothing heard before the last stop goes into the first recording of this session.
         queue.sync {
             pending = []; preRoll = []; recent = []; liveBatch = []
-            cutAt = .distantPast; openFailedAt = .distantPast
+            // A failed recording's said again straight away: starting takes down the note that said so.
+            cutAt = .distantPast; openFailedAt = .distantPast; openToldAt = .distantPast
         }
         SpeechGate.shared.start()
         do {
