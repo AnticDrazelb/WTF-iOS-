@@ -1188,8 +1188,11 @@ actor Pipeline {
             events: found.appointments.map { ($0.what, $0.when, $0.place, $0.booked) }, conversationStart: c.start, lines: recent)
         // The rules' finds give the AI's their quote and doubts, but a to-do or shopping item only
         // the rules found isn't suggested: they misfire on everyday talk ("I'm going to bed now").
+        // One said before the lines the AI read is kept, though: nothing else would find it.
+        let read = Set(recent)
         let merged = ActionRules.merge(fromModel, ruleActions(c)).filter { a in
             a.type == .event || fromModel.contains { $0.type == a.type && $0.title.lowercased() == a.title.lowercased() }
+                || !(a.source.map { read.contains($0) } ?? true)
         }
         await suggest(for: c, found: merged)
     }

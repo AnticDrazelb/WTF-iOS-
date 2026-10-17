@@ -31,8 +31,12 @@ final class ListeningActivity {
         // quarter of an hour over nothing. Waited for (briefly), as WTF's about to be gone; not
         // through stop(), whose tasks need the main thread, which is the one waiting here.
         NotificationCenter.default.addObserver(forName: UIApplication.willTerminateNotification, object: nil, queue: nil) { _ in
-            // Its end isn't iOS taking the card away, so no notice says WTF's still listening.
-            MainActor.assumeIsolated { ListeningActivity.shared.stateWatch?.cancel() }
+            // Its end isn't iOS taking the card away, so no notice says WTF's still listening; and
+            // one already given would say so after WTF's gone.
+            MainActor.assumeIsolated {
+                ListeningActivity.shared.stateWatch?.cancel()
+                ListeningActivity.withdrawGoneNotice()
+            }
             let done = DispatchSemaphore(value: 0)
             Task.detached {
                 for card in Activity<ListeningAttributes>.activities { await card.end(nil, dismissalPolicy: .immediate) }
@@ -68,6 +72,8 @@ final class ListeningActivity {
     /// From the app coming forward, and from the card's and the controls' buttons before answering.
     /// [often]: from new topics, which come all the time, so a try at most once a minute.
     func restoreIfNeeded(often: Bool = false) {
+        // Live Activities turned off for WTF: no card's coming back, so no notice says it will.
+        if !Self.allowed { Self.withdrawGoneNotice() }
         guard AppModel.shared.recording, !showing, Self.allowed else { return }
         // iOS only lets a card start from the app in front (or a button's intent): from the
         // background it says no, so not every new topic tries again.
@@ -135,7 +141,15 @@ final class ListeningActivity {
                 guard phase == .ended || phase == .dismissed else { continue }
                 guard let self, self.activity?.id == card.id, AppModel.shared.recording else { return }
                 await card.end(nil, dismissalPolicy: .immediate)
-                if !Task.isCancelled, UIApplication.shared.applicationState == .background {
+                guard !Task.isCancelled else { return }
+                // In front (iOS's 8 hours were up while WTF was open), another can start now: else
+                // there'd be none, and no notice, once the iPhone's locked.
+                if UIApplication.shared.applicationState == .active {
+                    self.restoreIfNeeded()
+                    return
+                }
+                // Not when Live Activities were turned off for WTF: opening it won't bring the card back.
+                if Self.allowed, UIApplication.shared.applicationState == .background {
                     let content = UNMutableNotificationContent()
                     content.title = "WTF is still listening"
                     content.body = "The Lock Screen card has gone. Open WTF to bring it back."

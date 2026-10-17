@@ -97,6 +97,12 @@ struct RootView: View {
         }
         .onChange(of: model.stopSheet) { _, on in
             guard on else { showingStop = false; return }
+            // Straight away when nothing else is up (the Paused button), so the tap isn't felt as missed.
+            // Every window, not just the key one, which may not be key yet when WTF's just been opened.
+            let busy = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+                .flatMap(\.windows).contains { $0.rootViewController?.presentedViewController != nil }
+            guard busy else { showingStop = true; return }
+            // Otherwise once a tab's own sheet or dialog has closed.
             // The model itself, not the local @Bindable wrapper, goes into the task.
             Task { [model] in
                 try? await Task.sleep(for: .milliseconds(400))

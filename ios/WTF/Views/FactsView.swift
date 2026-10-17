@@ -29,6 +29,7 @@ struct FactsView: View {
                 HStack(spacing: 14) {
                     Image(systemName: "plus.circle").font(.title2).foregroundStyle(.tertiary)
                     TextField("Add something to remember", text: $draft)
+                        .submitLabel(.done)
                         .onSubmit(add)
                 }
             } footer: {
@@ -36,6 +37,8 @@ struct FactsView: View {
             }
         }
         .navigationTitle("Things WTF Knows")
+        // Typed but not yet entered when going back: kept rather than lost without a word.
+        .onDisappear(perform: add)
         .alert("Edit", isPresented: Binding(get: { editing != nil }, set: { if !$0 { editing = nil } })) {
             TextField("Fact", text: $typed)
             Button("Cancel", role: .cancel) {}

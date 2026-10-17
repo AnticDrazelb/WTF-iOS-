@@ -273,7 +273,8 @@ struct TimelineEntry: View {
                     .padding(.leading, 4)
                 }
             }
-            .padding(.leading, large ? 0 : 10).padding(.vertical, 8)
+            // With the row's 8 pt inset, the card's margins match the Your Day card's.
+            .padding(.leading, large ? 8 : 10).padding(.vertical, 8)
         }
         .fixedSize(horizontal: false, vertical: true)
     }

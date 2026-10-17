@@ -26,6 +26,8 @@ public enum Prompts {
 
     public static func intent(_ question: String) -> RecallIntent {
         let q = plain(question).lowercased()
+        // "What did I just say I'd do?" is about what was said a moment ago, not every promise.
+        if !timeWords.test(q), latest.test(q), Rx(#"\bjust\b"#).test(q) { return .latest }
         if commitment.test(q) { return .commitments }
         // Before the recap: "summarise what we were just talking about" is about the latest talk, not the day.
         if !timeWords.test(q), latest.test(q) || ((looseLatest.test(q) || vagueLatest.test(q)) && Set(keywords(q)).subtracting(askingWords).isEmpty) { return .latest }

@@ -303,13 +303,19 @@ public enum ActionRules {
                 // The date that follows the thing first ("dentist? ... next Tuesday"), then anything before it
                 // ("do it tonight or you'll forget what about your dentist" must not be tonight).
                 var candidates: [String] = []
-                if let noun, let r = sentence.lowercased().range(of: noun[2]) {
-                    candidates.append(String(sentence[r.lowerBound...]))
+                // What it is, with the couple of words before it: "kids' party" isn't an evening one.
+                var about = noun?[0] ?? ""
+                let lower = sentence.lowercased()
+                if let noun, let r = lower.range(of: noun[2].lowercased()) {
+                    // Found again in [sentence] itself: lowercasing can change the length before it.
+                    if let s = sentence.range(of: noun[2], options: .caseInsensitive) { candidates.append(String(sentence[s.lowerBound...])) }
+                    // From the lowercased text the range came from: its indices needn't fit [sentence].
+                    about = lower[..<r.upperBound].split(separator: " ").suffix(3).joined(separator: " ")
                 }
                 if noun != nil, i + 1 < sentences.count, !eventNoun.test(sentences[i + 1]) { candidates.append(sentences[i + 1]) }
                 candidates.append(sentence)
                 guard let (said, resolved) = candidates.lazy.compactMap({ c in
-                    WhenParser.parse(c, reference: reference, calendar: calendar, about: noun?[0] ?? "").map { (c, $0) }
+                    WhenParser.parse(c, reference: reference, calendar: calendar, about: about).map { (c, $0) }
                 }).first else { continue }
                 // "He turned five today": happening already, not one for the calendar.
                 if happeningToday(resolved, conversationStart: reference, calendar: calendar) { continue }

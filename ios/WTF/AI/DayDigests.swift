@@ -72,6 +72,13 @@ final class DayDigests {
         save()
     }
 
+    /// Several deleted at once: their days' recaps go, with the file written once.
+    func forget(days: [Date]) {
+        generation += 1
+        for day in days { kept[Self.key(day)] = nil }
+        save()
+    }
+
     /// Settings › Delete All Recordings.
     func forget() {
         generation += 1

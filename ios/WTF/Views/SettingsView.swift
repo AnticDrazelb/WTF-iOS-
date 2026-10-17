@@ -1,3 +1,4 @@
+import FoundationModels
 import Network
 import SwiftData
 import SwiftUI
@@ -19,7 +20,8 @@ struct SettingsView: View {
     @AppStorage("voices") private var voicesOn = true
     @AppStorage("voicesDownloaded") private var voicesDownloaded = false
     @State private var voicesLoading = false
-    @State private var voicesFailed = false
+    /// Why the voice models didn't download, so the row says more than "Try Again".
+    @State private var voicesProblem: String?
     @Query(sort: \Person.name) private var people: [Person]
     @Query private var facts: [Fact]
     @AppStorage("useContacts") private var useContacts = false
@@ -95,7 +97,7 @@ struct SettingsView: View {
                     }
                     if let speechLanguage { LabeledContent("Language", value: speechLanguage) }
                     LabeledContent("Apple Intelligence") {
-                        Text(Brain.notReadyReason == nil ? "Ready" : "Not available").foregroundStyle(.secondary)
+                        Text(Self.intelligenceStatus).foregroundStyle(.secondary)
                     }
                 } header: {
                     Text("On This iPhone")
@@ -165,7 +167,7 @@ struct SettingsView: View {
                             if voicesLoading { ProgressView() }
                             else if voicesDownloaded { Text("Ready").foregroundStyle(.secondary) }
                             else {
-                                Button(voicesFailed ? "Try Again" : "Download (22 MB)") { downloadVoices() }
+                                Button(voicesProblem == nil ? "Download (22 MB)" : "Try Again") { downloadVoices() }
                                     .buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small)
                             }
                         }
@@ -177,7 +179,10 @@ struct SettingsView: View {
                 } header: {
                     Text("Voices")
                 } footer: {
-                    Text("Labels who said what. Tap a speaker in any transcript to say it\u{2019}s you or who they are, and WTF knows their voice from then on. Voiceprints stay on this iPhone.")
+                    VStack(alignment: .leading, spacing: 6) {
+                        if voicesOn, !voicesDownloaded, let voicesProblem { Text(voicesProblem) }
+                        Text("Labels who said what. Tap a speaker in any transcript to say it\u{2019}s you or who they are, and WTF knows their voice from then on. Voiceprints stay on this iPhone.")
+                    }
                 }
 
                 Section {
@@ -226,10 +231,10 @@ struct SettingsView: View {
                         }
                         Button("Cancel", role: .cancel) {}
                     } message: { _ in
-                        Text("This can\u{2019}t be undone.")
+                        Text("Conversations and Ask\u{2019}s history older than that are deleted. This can\u{2019}t be undone.")
                     }
                 } header: { Text("Conversations") } footer: {
-                    Text("Older conversations and their transcripts are deleted, as are list items ticked off or dismissed that long ago. What\u{2019}s still on your lists and the things WTF knows are kept.")
+                    Text("Older conversations, their transcripts and Ask\u{2019}s history are deleted, as are list items ticked off or dismissed that long ago. What\u{2019}s still on your lists and the things WTF knows are kept.")
                 }
 
                 Section {
@@ -351,6 +356,18 @@ struct SettingsView: View {
         }
     }
 
+    /// Apple Intelligence in a word or two, matching the reason given under the card: still
+    /// downloading or merely switched off isn't the same as this iPhone not supporting it.
+    private static var intelligenceStatus: String {
+        switch SystemLanguageModel.default.availability {
+        case .available: return "Ready"
+        case .unavailable(.modelNotReady): return "Downloading\u{2026}"
+        case .unavailable(.appleIntelligenceNotEnabled): return "Off"
+        case .unavailable(.deviceNotEligible): return "Not supported"
+        case .unavailable: return "Not available"
+        }
+    }
+
     private static func days(_ n: Int) -> String { n == 1 ? "1 day" : "\(n) days" }
 
     /// The download's progress, then a note while it's made ready for the Neural Engine (which
@@ -454,8 +471,9 @@ struct SettingsView: View {
 
     private static let noSpace = "Not enough free space: it needs about 1 GB. Free some up (Settings › General › iPhone Storage), then try again."
 
-    /// What stopped the Better Accuracy download, in words.
-    private static func why(_ error: Error) -> String {
+    /// What stopped a model download, in words. [noSpace] is said when the iPhone is full, as each
+    /// download needs a different amount.
+    private static func why(_ error: Error, noSpace full: String = SettingsView.noSpace) -> String {
         let e = error as NSError
         let errors = [e] + [e.userInfo[NSUnderlyingErrorKey] as? NSError].compactMap { $0 }
         for e in errors {
@@ -463,7 +481,7 @@ struct SettingsView: View {
                 return "No connection. Check Wi-Fi, then try again."
             }
             if (e.domain == NSCocoaErrorDomain && e.code == NSFileWriteOutOfSpaceError) || (e.domain == NSPOSIXErrorDomain && e.code == Int(ENOSPC)) {
-                return noSpace
+                return full
             }
         }
         return "The download didn\u{2019}t finish. Check Wi-Fi and free space, then try again."
@@ -478,9 +496,9 @@ struct SettingsView: View {
 
     private func downloadVoices() {
         voicesLoading = true
-        voicesFailed = false
+        voicesProblem = nil
         Task {
-            do { try await VoiceEngine.shared.prepare() } catch { voicesFailed = true }
+            do { try await VoiceEngine.shared.prepare() } catch { voicesProblem = Self.why(error, noSpace: "Not enough free space: it needs about 22 MB. Free some up (Settings › General › iPhone Storage), then try again.") }
             voicesDownloaded = VoiceEngine.downloaded
             voicesLoading = false
         }

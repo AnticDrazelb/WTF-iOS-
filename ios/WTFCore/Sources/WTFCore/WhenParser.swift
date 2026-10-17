@@ -100,7 +100,10 @@ public enum WhenParser {
            !Rx(#"\b(today|tonight|tomorrow|tmrw|weekend|a week|this (morning|afternoon|evening))\b"#).test(q) {
             doubt = "No day said, just next week"
         }
-        var time = parseTime(q, evening: eveningPlan.test(q + " " + about.lowercased()))
+        // "Kids' party" in [about] is the "party" the phrase starts with: not an evening one.
+        var plan = q + " " + about.lowercased()
+        if morningParty.test(about.lowercased()) { plan = Rx(#"\bparty\b"#).replace(plan, with: " ") }
+        var time = parseTime(q, evening: eveningPlan.test(plan))
         // A bare "today at 3" that's already passed this morning is probably pm.
         if let t = time, date == today, (t.0 * 60 + t.1) < ((reference.hour ?? 0) * 60 + (reference.minute ?? 0)), t.0 < 12,
            !Rx(#"\bam\b|morning"#).test(q) {
@@ -111,8 +114,9 @@ public enum WhenParser {
 
     static let nextWeek = Rx(#"\bnext week\b"#)
     /// Plans that are in the evening unless said otherwise: "dinner at 8" isn't breakfast time.
-    /// Not "tea", which can be either; nor a children's party, often in the morning.
-    static let eveningPlan = Rx(#"\b(dinner|drinks|party|gig|pub|takeaway)\b(?<!\b(?:kids|kids['’]|children['’]s|child['’]s) party)"#)
+    /// Not "tea", which can be either; nor a children's or birthday party, often in the morning.
+    static let eveningPlan = Rx(#"\b(dinner|drinks|party|gig|pub|takeaway)\b(?<!\b(?:kids|kids['’]|children['’]s|child['’]s|birthday) party)"#)
+    static let morningParty = Rx(#"\b(?:kids|kids['’]|children['’]s|child['’]s|birthday) party\b"#)
 
     /// A day of the month or a month named: "the 1st", "2 November", "November 2", "5/11".
     static let explicitDate: Rx = {
@@ -164,6 +168,10 @@ public enum WhenParser {
         // "this Friday" said on a Friday is today. "Tuesday week" and "a week on Tuesday" are a week after.
         if let m = Rx(#"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday) week\b|\ba week (?:on|from) (monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"#).first(q) {
             return today.next(days[m[1].isEmpty ? m[2] : m[1]]!).plus(days: 7)
+        }
+        // "Tuesday next week", "next week on Wednesday": that day in the week starting next Monday.
+        if let m = Rx(#"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+(?:of\s+)?next week\b|\bnext week\s+(?:on\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"#).first(q) {
+            return today.next(2).plus(days: (days[m[1].isEmpty ? m[2] : m[1]]! + 5) % 7)
         }
         if let m = Rx(#"\b(next|this|on)?\s*(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"#).first(q) {
             var d = today.next(days[m[2]]!, orSame: m[1] == "this")

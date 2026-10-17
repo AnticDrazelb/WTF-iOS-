@@ -262,7 +262,7 @@ final class AppModel {
         }
         // Not before the first-run screen has said what WTF does: a shortcut can be used first.
         guard UserDefaults.standard.bool(forKey: "welcomed") else {
-            problem = "Before WTF listens, open it to see how it works."
+            problem = "Before WTF listens, open WTF to see how it works."
             return false
         }
         // iOS can't ask for the microphone from the background (a control, Siri): until it's been
@@ -275,7 +275,7 @@ final class AppModel {
         guard await AVPermissions.microphone() else {
             // Not tried again on every opening: the alert this time says where to turn it on.
             UserDefaults.standard.set(false, forKey: "listening")
-            problem = "WTF needs the microphone: Settings › Privacy & Security › Microphone."
+            problem = Self.micNote
             return false
         }
         // Now it's clear why: WTF says when it stops listening, and what it heard to act on. Asked
@@ -450,8 +450,16 @@ final class AppModel {
     /// Shows a button's answer notification while WTF is in front (see AnswerNotices).
     private static let notices = AnswerNotices()
 
+    /// Why listening didn't start when the microphone was turned down.
+    static let micNote = "WTF needs the microphone: Settings › Privacy & Security › Microphone."
+
     /// On opening the app: if listening should be on but the mic isn't running, start it again.
     func resumeIfNeeded() {
+        // Back from Settings with the microphone turned on: the note no longer stands. Not
+        // started for you, as you'd turned listening off by saying no.
+        if problem == Self.micNote, AVAudioApplication.shared.recordPermission == .granted {
+            problem = "Listening didn\u{2019}t start. Tap to start it."
+        }
         // A start from Control Center or Siri that didn't work says to open WTF: not once it's open.
         if !recording, !isStarting, let problem, problem != Self.storeLostNote, problem.localizedCaseInsensitiveContains("open WTF") {
             self.problem = "Listening didn\u{2019}t start. Tap to start it."
@@ -469,7 +477,8 @@ final class AppModel {
                     problem = "Paused while something else has the microphone. WTF carries on when it\u{2019}s free."
                 } else {
                     paused = false
-                    problem = noProblem
+                    // Not the free-space note: the microphone coming back doesn't make room to save.
+                    if problem != Self.noSpaceNote { problem = noProblem }
                 }
             }
         }
@@ -616,7 +625,8 @@ final class AppModel {
         let days = conversations.map(\.start)
         let spans = conversations.map { (start: $0.start, end: $0.end) }
         // Before the views hide them: a recap they start writing again now, without these, is kept.
-        for day in days { DayDigests.shared.forget(day: day) }
+        // All at once, not once a conversation: each forget rewrites the recaps' file.
+        DayDigests.shared.forget(days: days)
         hiding.formUnion(keys)
         // Nothing said what's on screen: closed to be safe, as a page left on a deleted one can crash.
         let known = !onScreen.isEmpty || !daysOnScreen.isEmpty
@@ -644,17 +654,21 @@ final class AppModel {
         // Recordings from then still waiting (a retry) would otherwise come back as a new conversation.
         await pipeline.drop(spans: spans)
         for c in conversations { context.delete(c) }
-        for id in ids {
-            let cid: UUID? = id
-            for item in (try? context.fetch(FetchDescriptor<ActionItem>(predicate: #Predicate { $0.conversationID == cid && $0.status == "suggested" }))) ?? [] {
-                context.delete(item)
-            }
-            for fact in (try? context.fetch(FetchDescriptor<Fact>(predicate: #Predicate { $0.conversationID == cid }))) ?? [] {
-                if keepFacts { fact.conversationID = nil } else { context.delete(fact) }
-            }
-            for chunk in (try? context.fetch(FetchDescriptor<Chunk>(predicate: #Predicate { $0.conversationID == cid }))) ?? [] {
-                context.delete(chunk)
-            }
+        // One fetch each, sorted out here, not three a conversation: a big expiry (Keep Transcripts
+        // cut from 90 days to 7) would otherwise hold up the screen with thousands of them.
+        let gone = Set(ids)
+        func theirs(_ id: UUID?) -> Bool { id.map { gone.contains($0) } ?? false }
+        // Turned-down ones too: kept only so they aren't suggested again from the same talk, and
+        // they hold the words said.
+        for item in (try? context.fetch(FetchDescriptor<ActionItem>(predicate: #Predicate { $0.status == "suggested" || $0.status == "dismissed" }))) ?? []
+            where theirs(item.conversationID) {
+            context.delete(item)
+        }
+        for fact in (try? context.fetch(FetchDescriptor<Fact>(predicate: #Predicate { $0.conversationID != nil }))) ?? [] where theirs(fact.conversationID) {
+            if keepFacts { fact.conversationID = nil } else { context.delete(fact) }
+        }
+        for chunk in (try? context.fetch(FetchDescriptor<Chunk>(predicate: #Predicate { $0.conversationID != nil }))) ?? [] where theirs(chunk.conversationID) {
+            context.delete(chunk)
         }
         try? context.save()
         if current { Standby.shared.forget() }
@@ -777,12 +791,15 @@ final class AppModel {
             }
             // "What did I say I'd do today?": what's still on the list and every to-do noted in
             // today's conversations, not the one conversation that best matches "I'd".
-            if focus == nil, intent == .commitments, Self.saysToday.test(Prompts.plain(q)) {
+            // Not one that names someone or something ("what did I promise Tom today?"): the
+            // conversation about them is looked for instead.
+            if focus == nil, intent == .commitments, Self.saysToday.test(Prompts.plain(q)),
+               Set(Prompts.keywords(Prompts.plain(q))).subtracting(Self.commitmentWords).isEmpty {
                 let today = Calendar.current.startOfDay(for: now)
                 let all = (try? container.mainContext.fetch(FetchDescriptor<Conversation>(predicate: #Predicate { $0.start >= today }, sortBy: [SortDescriptor(\.start)]))) ?? []
                 let listed = openItems().filter { $0.type == .todo && !$0.suggested }.map(\.title)
                 let onList = Set(listed.map { $0.lowercased() })
-                let said = DayReview.gather(all.map(\.dayNote), limit: 99) { $0.todo }.map { $0.text }.filter { !onList.contains($0.lowercased()) }
+                let said = DayReview.gather(all.map(\.dayNote), limit: 99) { $0.todo.filter(Self.saidByYou) }.map { $0.text }.filter { !onList.contains($0.lowercased()) }
                 func bullets(_ lines: [String]) -> String { lines.map { "\u{2022} \($0)" }.joined(separator: "\n") }
                 var parts: [String] = []
                 if !listed.isEmpty { parts.append("Still to do:\n" + bullets(listed)) }
@@ -799,8 +816,12 @@ final class AppModel {
                     if Brain.notReadyReason == nil, let last = all.last, (last.title ?? "").isEmpty, !last.transcript.isEmpty {
                         let label = last.start.formatted(date: .omitted, time: .shortened)
                         let notes: [(label: String, title: String?, summary: String?)] = [(label: label, title: nil, summary: nil)]
-                        await answer(Prompts.focused(question: q, notes: notes, best: (label: label, transcript: last.transcript), now: now),
-                                     hasFallback: !parts.isEmpty)
+                        // With a list given already, only what's new in this one: asked as it was,
+                        // the AI would say nothing was promised today when this talk holds none.
+                        let narrower = "In this latest conversation only, did I say I'd do anything? List it briefly, or reply with just: none"
+                        await answer(Prompts.focused(question: parts.isEmpty ? q : narrower, notes: notes, best: (label: label, transcript: last.transcript), now: now),
+                                     hasFallback: !parts.isEmpty,
+                                     dropIf: { !parts.isEmpty && Prompts.plain($0).trimmingCharacters(in: CharacterSet.punctuationCharacters.union(.whitespacesAndNewlines)).lowercased() == "none" })
                         return
                     }
                     if parts.isEmpty {
@@ -893,6 +914,21 @@ final class AppModel {
     private static let pointsBack = Rx(#"\b(she|he|her|him|his|they|them|their|it|its|that|those|then|there)\b"#)
     /// A question about what you said you'd do that's about today only (see ask).
     private static let saysToday = Rx(#"\btoday\b"#)
+    /// Words that only say it's about what you'd do, not who or what it's about.
+    private static let commitmentWords: Set<String> = ["i'd", "i'll", "promise", "promised", "supposed", "need", "needed", "agreed", "commit",
+                                                       "committed", "todo", "todos", "owe", "got", "get", "gotta", "should", "must", "meant",
+                                                       "going", "told", "things", "anything", "something", "still", "list", "doing",
+                                                       "would", "will", "what's", "are", "for", "all", "any", "there", "left", "dos",
+                                                       "promises", "make", "made", "agree", "commitments", "tasks", "everything"]
+
+    /// A noted to-do of yours, not "Sarah: send the photos" or "Speaker 2: book the table":
+    /// the notes say who for each, and "what did I say I'd do?" is only yours.
+    nonisolated static func saidByYou(_ todo: String) -> Bool {
+        guard let colon = todo.firstIndex(of: ":"), todo.distance(from: todo.startIndex, to: colon) <= 24 else { return true }
+        let who = todo[..<colon].trimmingCharacters(in: CharacterSet.whitespaces.union(CharacterSet(charactersIn: "-\u{2022}*"))).lowercased()
+        return ["you", "me", "i", "we", "us", "both"].contains(who) || who.hasPrefix("you ") || who.hasSuffix(" you")
+            || who.hasPrefix("me ") || who.hasSuffix(" me")
+    }
 
     /// Said when catching up on the last few seconds takes too long (not an answer to follow on from).
     private static let stillTranscribing = "The last few seconds are still being transcribed, so this may miss them."
@@ -1111,7 +1147,9 @@ final class AppModel {
             // Notes are the last conversation's too: not passed off as this one's.
             var background = ""
             if latest != nil { background = await pipeline.latestBackground() }
-            if let gist = await Brain.quick(Prompts.spoken(transcript: transcript, topic: topic, leftAt: hanging, now: now, background: background, start: latest?.start, end: latest?.end), seconds: ai)?
+            // The last line is the words just heard, if any: not as old as the conversation's end.
+            let lastSaid = live.isEmpty ? latest?.end : now
+            if let gist = await Brain.quick(Prompts.spoken(transcript: transcript, topic: topic, leftAt: hanging, now: now, background: background, start: latest?.start, end: lastSaid), seconds: ai)?
                 .trimmingCharacters(in: .whitespacesAndNewlines), !gist.isEmpty {
                 return (gist, covers, true)
             }
@@ -1155,7 +1193,8 @@ final class AppModel {
     /// [smaller]: the same with less of what was heard in it, tried if [prompt] doesn't fit in
     /// Apple Intelligence's context (the token count is only an estimate). [hasFallback]: an
     /// answer's already been given (word for word), so if the AI adds nothing, nothing more is said.
-    private func answer(_ prompt: String, smaller: String? = nil, hasFallback: Bool = false) async {
+    /// [dropIf]: an answer that says nothing worth showing ("none"), left out.
+    private func answer(_ prompt: String, smaller: String? = nil, hasFallback: Bool = false, dropIf: (String) -> Bool = { _ in false }) async {
         status = "Thinking\u{2026}"
         // Written in a task of its own, given up on after a minute: Apple's AI can stall, and
         // Ask would be stuck on "Thinking…" until WTF was closed.
@@ -1180,12 +1219,12 @@ final class AppModel {
         if let failure, !stopped { Log.error("Apple Intelligence couldn't answer", failure) }
         if let failure, let smaller, text.isEmpty, !stopped, Brain.isTooLong(failure) {
             Log.info("The question's notes were too long for Apple Intelligence; trying again with less")
-            await answer(smaller, hasFallback: hasFallback)
+            await answer(smaller, hasFallback: hasFallback, dropIf: dropIf)
             return
         }
         guard failure != nil || writing.isCancelled else {
             if !text.isEmpty {
-                add(ChatMessage(fromUser: false, text: text))
+                if !dropIf(text) { add(ChatMessage(fromUser: false, text: text)) }
             } else if !hasFallback {
                 add(ChatMessage(fromUser: false, text: "I couldn\u{2019}t find an answer to that in what I heard."))
             }

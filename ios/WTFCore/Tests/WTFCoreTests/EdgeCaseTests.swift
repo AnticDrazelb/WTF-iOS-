@@ -46,6 +46,14 @@ final class EdgeCaseTests: XCTestCase {
         XCTAssertEqual(dentist.flatMap { $0.resolved }.map { [$0.year, $0.month, $0.day] }, [2026, 10, 16])
     }
 
+    func testTextThatLowercasesLongerDoesntMoveTheDate() {
+        // "İ" lowercases to two characters' worth: the date must still be read from the dentist on.
+        let lines = ["[10:00:00] You: İİİİİİİİİİİİİİİİİİİİİİİİ tonight was fine, but the dentist is Friday at 10am."]
+        let found = ActionRules.ruleActions(lines, conversationStart: date(2026, 10, 14, 10, 0), title: nil, calendar: london)
+        let dentist = found.first { $0.type == .event }
+        XCTAssertEqual(dentist.flatMap { $0.resolved }.map { [$0.day, $0.hour ?? -1] }, [16, 10])
+    }
+
     func testMergeKeepsADifferentPlanOnTheSameDay() {
         let tomorrow = WhenResult(year: 2026, month: 10, day: 12, hour: 10, minute: 0)
         let evening = WhenResult(year: 2026, month: 10, day: 12, hour: 19, minute: 0)

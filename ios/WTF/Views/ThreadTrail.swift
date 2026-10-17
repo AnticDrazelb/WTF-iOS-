@@ -60,17 +60,22 @@ struct ThreadChip: View {
 /// not while another answer's being written, as that tap would be lost.
 struct ThreadList: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.dynamicTypeSize) private var typeSize
     let threads: [TopicThread]
     let onTap: (TopicThread) -> Void
     /// One width for every status's symbol, so the titles line up (the bubble's wider than the circles).
     @ScaledMetric private var iconWidth: CGFloat = 24
+
+    private var large: Bool { typeSize.isAccessibilitySize }
 
     var body: some View {
         ForEach(threads) { t in
             Button { onTap(t) } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Image(systemName: icon(t)).foregroundStyle(t.status == .current || t.status == .hanging ? Color.primary : Color.secondary)
-                        .frame(width: iconWidth)
+                        // Kept from growing past the first large size, so it doesn't take the title's width.
+                        .frame(width: min(iconWidth, 40))
+                        .dynamicTypeSize(...DynamicTypeSize.accessibility1)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(t.title).foregroundStyle(.primary)
                         if let facts = t.facts, !facts.isEmpty {
@@ -79,9 +84,15 @@ struct ThreadList: View {
                         if t.status == .hanging, let left = t.leftAt, !left.isEmpty {
                             Text(left.prefix(1).uppercased() + left.dropFirst()).font(.footnote).italic().foregroundStyle(.secondary)
                         }
+                        // At large text sizes the time goes under the topic, so the title has the width.
+                        if large {
+                            Text(t.start, format: .dateTime.hour().minute()).font(.footnote).foregroundStyle(.secondary)
+                        }
                     }
-                    Spacer()
-                    Text(t.start, format: .dateTime.hour().minute()).font(.footnote).foregroundStyle(.secondary)
+                    if !large {
+                        Spacer()
+                        Text(t.start, format: .dateTime.hour().minute()).font(.footnote).foregroundStyle(.secondary)
+                    }
                 }
             }
             .disabled(model.status != nil)

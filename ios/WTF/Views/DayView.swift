@@ -98,6 +98,7 @@ struct YourDayRow: View {
 /// and every conversation; each a tap from where it was said.
 struct DayView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.dynamicTypeSize) private var typeSize
     let day: Date
     @Query private var conversations: [Conversation]
     @State private var recap: String?
@@ -131,13 +132,18 @@ struct DayView: View {
                 Section("Conversations") {
                     ForEach(conversations) { c in
                         NavigationLink(value: c) {
-                            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                                Text(clock(c.start)).font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
+                            // At large text sizes the time goes above the title, as on the Timeline,
+                            // so the title has the width and isn't squeezed a word to a line.
+                            if typeSize.isAccessibilitySize {
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(displayTitle(c)).font(.headline)
-                                    if let first = c.summary?.split(separator: "\n").first {
-                                        Text(DayReview.tidy(String(first))).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
-                                    }
+                                    Text(clock(c.start)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                                    conversationText(c)
+                                }
+                            } else {
+                                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                                    Text(clock(c.start)).font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
+                                        .fixedSize()
+                                    conversationText(c)
                                 }
                             }
                         }
@@ -155,6 +161,16 @@ struct DayView: View {
             writing = DayDigests.shared.needsWriting(day, notes: toWrite)
             recap = await DayDigests.shared.recap(for: day, notes: toWrite) ?? DayDigests.lastStanding(for: day, notes: toWrite)
             writing = false
+        }
+    }
+
+    /// A conversation's title and the first line of its summary.
+    private func conversationText(_ c: Conversation) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(displayTitle(c)).font(.headline)
+            if let first = c.summary?.split(separator: "\n").first {
+                Text(DayReview.tidy(String(first))).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
+            }
         }
     }
 

@@ -268,6 +268,9 @@ final class Recorder: @unchecked Sendable {
         do {
             try restart()
             setRetrying(false)
+            // A note over the free-space one (Paused) is cleared as the microphone comes back:
+            // if recordings still can't be saved, that's said again at once, not ten minutes on.
+            queue.async { self.openToldAt = .distantPast }
             Log.info("Listening resumed \(why)")
             onResumed?()
         } catch {
