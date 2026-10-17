@@ -83,28 +83,38 @@ struct SettingsView: View {
                     Text("Only speech is kept: silence and music are never stored, and audio is deleted once its conversation is over. iPhones stop apps that are swiped away, so leave WTF open in the background.")
                 }
 
-                Section("On This iPhone") {
+                Section {
                     LabeledContent("Speech Recognition") {
                         // A first start downloads it too: not offered twice meanwhile.
                         if let p = model.speechDownload, downloading || model.isStarting {
                             Text("Downloading\u{2026} \(Int(p * 100))%").foregroundStyle(.secondary).monospacedDigit()
                         } else if downloading || (model.isStarting && speechReady != true) { ProgressView() }
                         else if speechReady == true { Text("Ready").foregroundStyle(.secondary) }
-                        else if speechReady == false { Button("Download") { download() } }
+                        else if speechReady == false { Button("Download") { download() }.buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small) }
                         else { ProgressView() }
                     }
                     if let speechLanguage { LabeledContent("Language", value: speechLanguage) }
-                    if let phoneLanguage, let speechLanguage {
-                        Text("Your iPhone\u{2019}s language is \(phoneLanguage), but WTF transcribes in \(speechLanguage), so speech in other languages comes out garbled.").font(.footnote).foregroundStyle(.secondary)
-                    }
                     LabeledContent("Apple Intelligence") {
                         Text(Brain.notReadyReason == nil ? "Ready" : "Not available").foregroundStyle(.secondary)
                     }
-                    if SpeechEngine.usesDictation {
-                        Text("This iPhone can\u{2019}t run Apple\u{2019}s newer speech model, so WTF uses the dictation one (the keyboard\u{2019}s microphone). It\u{2019}s a little less accurate on long conversations.").font(.footnote).foregroundStyle(.secondary)
+                } header: {
+                    Text("On This iPhone")
+                } footer: {
+                    // Said under the card, as every other section does, rather than as rows in it.
+                    // Left out when there's nothing to say, so an empty footer doesn't leave a gap.
+                    if speechProblem != nil || (phoneLanguage != nil && speechLanguage != nil)
+                        || SpeechEngine.usesDictation || Brain.notReadyReason != nil {
+                        VStack(alignment: .leading, spacing: 6) {
+                            if let speechProblem { Text(speechProblem).foregroundStyle(.red) }
+                            if let phoneLanguage, let speechLanguage {
+                                Text("Your iPhone\u{2019}s language is \(phoneLanguage), but WTF transcribes in \(speechLanguage), so speech in other languages comes out garbled.")
+                            }
+                            if SpeechEngine.usesDictation {
+                                Text("This iPhone can\u{2019}t run Apple\u{2019}s newer speech model, so WTF uses the dictation one (the keyboard\u{2019}s microphone). It\u{2019}s a little less accurate on long conversations.")
+                            }
+                            if let why = Brain.notReadyReason { Text(why) }
+                        }
                     }
-                    if let speechProblem { Text(speechProblem).font(.footnote).foregroundStyle(.red) }
-                    if let why = Brain.notReadyReason { Text(why).font(.footnote).foregroundStyle(.secondary) }
                 }
 
                 // Still shown after a change of language while it's on, so the model can be deleted.
@@ -124,12 +134,10 @@ struct SettingsView: View {
                             LabeledContent("Parakeet Model") {
                                 if let progress = model.betterProgress { betterDownloading(progress) }
                                 else if betterDownloaded { Text("Ready").foregroundStyle(.secondary) }
-                                else { Button(betterProblem == nil ? "Download (440 MB)" : "Try Again") { downloadBetter() } }
-                            }
-                            if let betterProblem { Text(betterProblem).font(.footnote).foregroundStyle(.secondary) }
-                            // Listening keeps WTF running in the background; otherwise iOS soon stops it.
-                            if model.betterProgress != nil && !model.recording {
-                                Text("Keep WTF open until it\u{2019}s done: iOS stops the download soon after you leave.").font(.footnote).foregroundStyle(.secondary)
+                                else {
+                                    Button(betterProblem == nil ? "Download (440 MB)" : "Try Again") { downloadBetter() }
+                                        .buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small)
+                                }
                             }
                         }
                     } header: {
@@ -138,7 +146,14 @@ struct SettingsView: View {
                         if !Parakeet.suitable {
                             Text("Better Accuracy only works when WTF transcribes in English. Turn it off to delete the 440 MB model.")
                         } else {
-                            Text("When a conversation ends, WTF transcribes it again with NVIDIA\u{2019}s Parakeet speech model before writing it up: fewer misheard words, most of all with background noise. English only. A one-off download of about 440 MB, best on Wi-Fi; it runs on this iPhone, and turning it off deletes it. Live transcription still uses Apple\u{2019}s.")
+                            VStack(alignment: .leading, spacing: 6) {
+                                if betterOn, let betterProblem { Text(betterProblem) }
+                                // Listening keeps WTF running in the background; otherwise iOS soon stops it.
+                                if betterOn && model.betterProgress != nil && !model.recording {
+                                    Text("Keep WTF open until it\u{2019}s done: iOS stops the download soon after you leave.")
+                                }
+                                Text("When a conversation ends, WTF transcribes it again with NVIDIA\u{2019}s Parakeet speech model before writing it up: fewer misheard words, most of all with background noise. English only. A one-off download of about 440 MB, best on Wi-Fi; it runs on this iPhone, and turning it off deletes it. Live transcription still uses Apple\u{2019}s.")
+                            }
                         }
                     }
                 }
@@ -149,7 +164,10 @@ struct SettingsView: View {
                         LabeledContent("Voice Models") {
                             if voicesLoading { ProgressView() }
                             else if voicesDownloaded { Text("Ready").foregroundStyle(.secondary) }
-                            else { Button(voicesFailed ? "Try Again" : "Download (22 MB)") { downloadVoices() } }
+                            else {
+                                Button(voicesFailed ? "Try Again" : "Download (22 MB)") { downloadVoices() }
+                                    .buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small)
+                            }
                         }
                     }
                     // Not hidden with the switch: voiceprints are kept, and this is where they're forgotten.
@@ -291,6 +309,8 @@ struct SettingsView: View {
             .onChange(of: scenePhase) { if scenePhase == .active { Task { await checkPermissions() } } }
             // Back from Words You've Corrected.
             .onChange(of: model.settingsPath.count) { fixesCount = Learned.fixes.count }
+            // The stop sheet can't show over a dialog: they close for it.
+            .onChange(of: model.stopSheet) { _, on in if on { confirmMobileData = false; confirmWipe = false; pendingDays = nil } }
             .confirmationDialog("Delete everything WTF has?", isPresented: $confirmWipe, titleVisibility: .visible) {
                 Button("Delete Everything", role: .destructive) {
                     Task {
@@ -707,6 +727,7 @@ struct PeopleView: View {
             if refused == Self.unusable { Text("Use a name of up to 30 letters, not a number or \u{201C}\(Labels.me)\u{201D}.") }
             else { Text("Two people with one name can\u{2019}t be told apart in transcripts again.") }
         }
+        .onChange(of: model.stopSheet) { _, on in if on { renaming = nil; refused = nil } }
     }
 
     private static let unusable = "That Name Can\u{2019}t Be Used"

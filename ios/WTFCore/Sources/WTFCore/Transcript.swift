@@ -124,7 +124,8 @@ public enum ListAnswers {
     /// Not "pick up" or "the shops" alone: "When do I pick up Ezra?", "What time do the shops shut?";
     /// nor any "buy": "What should I buy Mum?" is about a present, not the list.
     static let shopping = Rx(#"\b((need|needs|have|got|left|anything|things|stuff) to buy|shopping|groceries|supermarket|(pick up|get) (from|at) the (shop|shops|supermarket)|need from the shops?)\b"#)
-    static let events = Rx(#"\b(appointments?|calendar|meetings?|what'?s on|plans|schedule|diary|booked)\b"#)
+    /// "What have I got on today?" too: not "anything on the telly".
+    static let events = Rx(#"\b(appointments?|calendar|meetings?|what'?s on|(have|has) (i|we) got (anything )?on|got anything on|anything on (today|tonight|tomorrow|this|next|on|at)|plans|schedule|diary|booked)\b"#)
     /// Words that ask what's coming up, not about one thing on it.
     static let eventWords: Set<String> = ["appointment", "appointments", "meeting", "meetings", "calendar", "diary", "schedule", "plans",
                                           "booked", "coming", "upcoming", "soon", "today", "tonight", "tomorrow", "week", "weeks", "weekend",
@@ -150,11 +151,10 @@ public enum ListAnswers {
             f.setLocalizedDateFormatFromTemplate(template)
             return f
         }
-        // "What's on today?", "Any meetings tomorrow?": just that day.
-        let day: Date? = Rx(#"\b(today|tonight)\b"#).test(q) ? now
-            : Rx(#"\btomorrow\b"#).test(q) ? calendar.date(byAdding: .day, value: 1, to: now) : nil
+        // "What's on today?", "Any meetings on Friday?": just that day (or week, or month).
+        let span = period(q, now: now, calendar: calendar)
         let upcoming = open.filter { $0.type == .event && ($0.start ?? .distantFuture) >= now.addingTimeInterval(-3600) }
-            .filter { e in day.map { d in e.start.map { calendar.isDate($0, inSameDayAs: d) } ?? false } ?? true }
+            .filter { e in span.map { s in e.start.map { $0 >= s.start && $0 < s.end } ?? false } ?? true }
             .sorted { ($0.start ?? .distantFuture) < ($1.start ?? .distantFuture) }
         let f = formatter("EEEdMMMjmm"), d = formatter("EEEdMMM")
         func line(_ i: Item) -> String {
@@ -169,7 +169,7 @@ public enum ListAnswers {
             return heard.isEmpty ? first : first + "\n\n" + notAdded + "\n" + lines(heard)
         }
         func coming(_ empty: String) -> String { list(upcoming, empty, "Coming up:") }
-        let when = day == nil ? "upcoming appointments" : Rx(#"\btomorrow\b"#).test(q) ? "appointments tomorrow" : "appointments today"
+        let when = span.map { "appointments " + $0.name } ?? "upcoming appointments"
         // "When…", "What time…": about a plan, not the list.
         if shopping.test(q), !Rx(#"\b(when|what time)\b"#).test(q) { return list(open.filter { $0.type == .buy }, "Nothing to buy on your list.", "To buy:") }
         if todos.test(q) { return list(open.filter { $0.type == .todo }, "Nothing on your to-do list.", "Still to do:") }
@@ -187,6 +187,39 @@ public enum ListAnswers {
         // Not one plan in particular ("What's the meeting with the bank about?", "Is the restaurant
         // booked?"): what was said about it is in the conversations.
         if events.test(q), Set(Prompts.keywords(q)).subtracting(eventWords).isEmpty { return coming("No \(when) on your list.") }
+        return nil
+    }
+
+    /// The days a question asks about ("tomorrow", "on Friday", "this week"), and how to say them;
+    /// nil for everything coming up.
+    static func period(_ q: String, now: Date, calendar: Calendar) -> (start: Date, end: Date, name: String)? {
+        func days(_ from: Date, _ n: Int, _ name: String) -> (start: Date, end: Date, name: String)? {
+            let start = calendar.startOfDay(for: from)
+            return calendar.date(byAdding: .day, value: n, to: start).map { (start, $0, name) }
+        }
+        func interval(_ unit: Calendar.Component, _ from: Date?, _ name: String) -> (start: Date, end: Date, name: String)? {
+            from.flatMap { calendar.dateInterval(of: unit, for: $0) }.map { ($0.start, $0.end, name) }
+        }
+        if Rx(#"\b(today|tonight)\b"#).test(q) { return days(now, 1, "today") }
+        if Rx(#"\btomorrow\b"#).test(q) { return calendar.date(byAdding: .day, value: 1, to: now).flatMap { days($0, 1, "tomorrow") } }
+        // "On Friday", "next Friday", "Friday week": worked out as anywhere else.
+        if let m = Rx(#"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"#).first(q),
+           let r = WhenParser.parse(q, reference: now, calendar: calendar) {
+            return days(r.start(in: calendar), 1, "on " + m[1].capitalized)
+        }
+        if Rx(#"\bnext weekend\b"#).test(q), let r = WhenParser.parse(q, reference: now, calendar: calendar) {
+            return days(r.start(in: calendar), 2, "next weekend")
+        }
+        if Rx(#"\bweekend\b"#).test(q) {
+            // On a Sunday, this weekend is what's left of it.
+            let weekday = calendar.component(.weekday, from: now)
+            if weekday == 1 { return days(now, 1, "this weekend") }
+            return calendar.date(byAdding: .day, value: 7 - weekday, to: now).flatMap { days($0, 2, "this weekend") }
+        }
+        if Rx(#"\bnext week\b"#).test(q) { return interval(.weekOfYear, calendar.date(byAdding: .day, value: 7, to: now), "next week") }
+        if Rx(#"\b(this|the) week\b"#).test(q) { return interval(.weekOfYear, now, "this week") }
+        if Rx(#"\bnext month\b"#).test(q) { return interval(.month, calendar.date(byAdding: .month, value: 1, to: now), "next month") }
+        if Rx(#"\b(this|the) month\b"#).test(q) { return interval(.month, now, "this month") }
         return nil
     }
 }

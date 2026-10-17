@@ -7,6 +7,7 @@ import UIKit
 /// Three lists, the way you'd keep them: Calendar, To-dos and Shopping. What WTF heard sits at
 /// the top of each, waiting for a yes ("Add") or a "Not Now"; below it, what's on the list.
 struct ListsView: View {
+    @Environment(AppModel.self) private var model
     @Environment(\.modelContext) private var context
     @Query(sort: \ActionItem.created, order: .reverse) private var items: [ActionItem]
     @State private var drafts: [String: String] = [:]
@@ -41,7 +42,8 @@ struct ListsView: View {
                 Text("What WTF hears you mention waits here. Nothing goes on a list until you add it.")
                     .font(.subheadline).foregroundStyle(.secondary)
                     .listRowBackground(Color.clear)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 4, trailing: 20))
+                    // From the card's edge, so it lines up with the title above.
+                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 4, trailing: 0))
                 ForEach(groups) { group in section(group) }
             }
             .animation(.snappy, value: items.map(\.status))
@@ -63,6 +65,8 @@ struct ListsView: View {
                 }
                 .ignoresSafeArea()
             }
+            // A tap on the listening pill: the stop sheet can't show over this one, so it goes.
+            .onChange(of: model.stopSheet) { _, on in if on { calendarItem = nil } }
         }
     }
 

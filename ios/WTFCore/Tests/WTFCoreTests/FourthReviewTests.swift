@@ -100,6 +100,9 @@ final class FourthReviewTests: XCTestCase {
         XCTAssertEqual(answer, ListAnswers.answer("What's on tomorrow?", open: items, now: now, calendar: london))
         XCTAssertTrue(answer?.contains("Dentist") ?? false, answer ?? "")
         XCTAssertEqual(Prompts.intent("What have I said I\u{2019}d do?"), .commitments)
+        // The welcome suggestion says "say", not "said".
+        XCTAssertEqual(Prompts.intent("What did I say I\u{2019}d do today?"), .commitments)
+        XCTAssertEqual(Prompts.intent("What did I say I'd do?"), .commitments)
     }
 
     func testOneThingFromTodayIsNotTheDayRecap() {

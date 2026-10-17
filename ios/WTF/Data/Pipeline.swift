@@ -830,7 +830,8 @@ actor Pipeline {
         try? modelContext.save()
         Log.info("You fixed \(pairs.count) word(s) in a line")
         await refreshVocabulary()
-        if let fresh = conversation(id) { await suggest(for: fresh, found: ruleActions(fresh)) }
+        // As when first heard: with the AI, the rules' to-dos and shopping aren't suggested on their own.
+        if let fresh = conversation(id) { await suggest(for: fresh, found: instantActions(fresh)) }
         return true
     }
 
@@ -1087,7 +1088,7 @@ actor Pipeline {
 
     /// What's suggested the moment it's heard. With the AI, only appointments with a day: to-dos
     /// and shopping wait for findListItems, where the AI weighs them, as the rules alone are noisy.
-    private func instantActions(_ c: Conversation, new: String) -> [ExtractedAction] {
+    private func instantActions(_ c: Conversation, new: String? = nil) -> [ExtractedAction] {
         let found = ruleActions(c, new: new)
         guard Brain.notReadyReason == nil else { return found }
         return found.filter { $0.type == .event && $0.resolved != nil }
@@ -1185,7 +1186,12 @@ actor Pipeline {
         let fromModel = ActionRules.fromModel(
             buy: found.buy, todo: found.todo,
             events: found.appointments.map { ($0.what, $0.when, $0.place, $0.booked) }, conversationStart: c.start, lines: recent)
-        await suggest(for: c, found: ActionRules.merge(fromModel, ruleActions(c)))
+        // The rules' finds give the AI's their quote and doubts, but a to-do or shopping item only
+        // the rules found isn't suggested: they misfire on everyday talk ("I'm going to bed now").
+        let merged = ActionRules.merge(fromModel, ruleActions(c)).filter { a in
+            a.type == .event || fromModel.contains { $0.type == a.type && $0.title.lowercased() == a.title.lowercased() }
+        }
+        await suggest(for: c, found: merged)
     }
 
     /// Suggests what's new: not on the list already, and not already suggested from this conversation.

@@ -6,7 +6,7 @@ public enum RecallIntent: Equatable, Sendable { case latest, digest, commitments
 /// Builds prompts for Apple's on-device model, whose context is small (4,096 tokens), so it's
 /// given only what the question needs. (A short version of the Android app's LocalRecall.)
 public enum Prompts {
-    static let commitment = Rx(#"promis|said i'?d|i said i would|to-?do|commit|agreed to|supposed to|\bowe\b|need to do|have to do"#)
+    static let commitment = Rx(#"promis|sa(?:y|id) i'?d|i sa(?:y|id) i would|to-?do|commit|agreed to|supposed to|\bowe\b|need to do|have to do"#)
     static let digest = Rx(#"summar|recap|my day|overview|what did i do\b(?!\s+(with|about))|what have i (done|been doing)|everything"#)
     /// Not any "just" or "where was I with…": "I just can't remember Tom's address" is a question of its own.
     static let latest = Rx(#"\b(what|where) (was|were|did) (i|we|he|she|they) just\b|\b(i|we) (was|were) just (saying|talking|on)\b|\bjust (now|said|saying)\b|a (minute|moment|sec|second)s? ago|where was i\b(?!\s+with)|lost (my|the) (train|thread)|where were we|last thing (i|we) said|^\W*wtf\W*$|\bwtf (was|were) (that|i|we)\b"#)
@@ -91,19 +91,19 @@ public enum Prompts {
         """
 
     /// "What was I just on about?": only the last few minutes of the latest conversation.
-    public static func latest(question: String, transcript: String, topic: String?, now: Date, background: String = "", start: Date? = nil) -> String {
+    public static func latest(question: String, transcript: String, topic: String?, now: Date, background: String = "", start: Date? = nil, end: Date? = nil) -> String {
         """
         \(background)The most recent conversation\(topic.map { " (topic: \($0))" } ?? ""), in order, oldest first; the last line is the most recent:
         \(tail(TranscriptFormat.compact(transcript), budget: background.isEmpty ? 900 : 700))
 
-        (It's \(clock(now)) now.\(when(start, now: now))) In 2 or 3 sentences, tell me what I was just talking about. If my last words trail off \
+        (It's \(clock(now)) now.\(when(start, end: end, now: now))) In 2 or 3 sentences, tell me what I was just talking about. If my last words trail off \
         unfinished, say what I was in the middle of saying. Only say I was interrupted if someone else spoke after me.
         My question: \(question)
         """
     }
 
     /// The same, for reading aloud in your ear: one or two short sentences, no lists.
-    public static func spoken(transcript: String, topic: String?, leftAt: String?, now: Date, background: String = "", start: Date? = nil) -> String {
+    public static func spoken(transcript: String, topic: String?, leftAt: String?, now: Date, background: String = "", start: Date? = nil, end: Date? = nil) -> String {
         let said = tail(TranscriptFormat.compact(transcript), budget: background.isEmpty ? 700 : 550)
         // Words just heard aren't sorted by voice yet: without this, the AI puts the user's own
         // newest words down to "someone".
@@ -114,7 +114,7 @@ public enum Prompts {
         \(background)The most recent conversation\(topic.map { " (topic: \($0))" } ?? ""), oldest first; the last line is the most recent:
         \(said)
         \(unsorted)\(leftAt.map { "\nEarlier, I dropped a topic part-way: \($0)\n" } ?? "")
-        (It's \(clock(now)) now.\(when(start, now: now))) In one or two short sentences that will be read aloud to me, say what I was just \
+        (It's \(clock(now)) now.\(when(start, end: end, now: now))) In one or two short sentences that will be read aloud to me, say what I was just \
         talking about and, if I trailed off, what I was in the middle of saying. No lists, no quotation marks.
         """
     }
@@ -240,8 +240,15 @@ public enum Prompts {
     }
 
     /// " That conversation was yesterday." when it wasn't today, so it isn't called "just now".
-    static func when(_ start: Date?, now: Date) -> String {
-        guard let start, !Calendar.current.isDate(start, inSameDayAs: now) else { return "" }
+    /// Nor is one that ended hours ago today: [end] is when its last line was said.
+    static func when(_ start: Date?, end: Date? = nil, now: Date) -> String {
+        guard let start, !Calendar.current.isDate(start, inSameDayAs: now) else {
+            guard let end, now.timeIntervalSince(end) > 600 else { return "" }
+            let minutes = Int(now.timeIntervalSince(end) / 60)
+            let ago = minutes < 60 ? "\(minutes) minutes" : minutes < 90 ? "an hour" : "\((minutes + 30) / 60) hours"
+            let f = DateFormatter(); f.setLocalizedDateFormatFromTemplate("jmm")
+            return " The last line was said at \(f.string(from: end)), about \(ago) ago, so say when rather than \"just\"."
+        }
         if let y = Calendar.current.date(byAdding: .day, value: -1, to: now), Calendar.current.isDate(start, inSameDayAs: y) {
             return " That conversation was yesterday, so say so rather than \"just\"."
         }

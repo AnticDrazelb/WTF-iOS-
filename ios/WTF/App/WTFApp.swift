@@ -50,6 +50,9 @@ struct WTFApp: App {
 struct RootView: View {
     @Environment(AppModel.self) private var model
     @AppStorage("welcomed") private var welcomed = false
+    /// The stop sheet, a moment after it's asked for: a tab's own sheet or alert (Fix Words, Add
+    /// to Calendar) closes itself first, and one presented while that's going wouldn't show.
+    @State private var showingStop = false
 
     var body: some View {
         if model.wiping {
@@ -87,10 +90,18 @@ struct RootView: View {
         } message: {
             Text(model.startFailed ?? "")
         }
-        .sheet(isPresented: $model.stopSheet) {
+        .sheet(isPresented: $showingStop, onDismiss: { model.stopSheet = false }) {
             StopListeningSheet()
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
+        }
+        .onChange(of: model.stopSheet) { _, on in
+            guard on else { showingStop = false; return }
+            // The model itself, not the local @Bindable wrapper, goes into the task.
+            Task { [model] in
+                try? await Task.sleep(for: .milliseconds(400))
+                if model.stopSheet { showingStop = true }
+            }
         }
     }
 }
@@ -100,6 +111,8 @@ struct StopListeningSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @Environment(\.dynamicTypeSize) private var typeSize
+    /// Taps on Stop: felt for the tap, not for listening stopping some other way.
+    @State private var stopTaps = 0
 
     var body: some View {
         // Scrolls, and the waveform makes way, so the buttons aren't cut off at large text sizes.
@@ -129,6 +142,7 @@ struct StopListeningSheet: View {
                 }
                 VStack(spacing: 10) {
                     Button {
+                        stopTaps += 1
                         model.setListening(false)
                         dismiss()
                     } label: {
@@ -162,7 +176,7 @@ struct StopListeningSheet: View {
             .padding(.top, 28).padding(.bottom, 20)
         }
         .tint(.primary)
-        .sensoryFeedback(.impact, trigger: model.recording)
+        .sensoryFeedback(.impact, trigger: stopTaps)
         // Stopped some other way while it's open (the Lock Screen card, Siri, the microphone
         // taken for good): it no longer stands.
         .onChange(of: model.recording) { _, on in if !on { dismiss() } }
@@ -174,6 +188,9 @@ struct StopListeningSheet: View {
 /// while something else (a call, Siri) has the microphone.
 struct ListeningButton: View {
     @Environment(AppModel.self) private var model
+    /// Taps that turn listening on or off: felt for those only, not when listening comes back by
+    /// itself as WTF opens or a call stops it, nor once for every tab's button.
+    @State private var taps = 0
 
     var body: some View {
         // While a start's under way (the first can be a long download), a tap gives up on it.
@@ -181,7 +198,10 @@ struct ListeningButton: View {
         // a tap opens the stop sheet, which says so and can stop it.
         Button {
             if model.recording && model.paused { model.stopSheet = true }
-            else { model.setListening(model.isStarting ? false : !model.recording) }
+            else {
+                taps += 1
+                model.setListening(model.isStarting ? false : !model.recording)
+            }
         } label: {
             HStack(spacing: 6) {
                 if model.recording && model.paused {
@@ -201,7 +221,7 @@ struct ListeningButton: View {
         // Just the words: otherwise the symbol's name is read out before them.
         .accessibilityLabel(model.recording ? (model.paused ? "Paused" : "Listening") : model.isStarting ? starting : "Listen")
         .accessibilityHint(model.recording ? (model.paused ? "Shows options to stop listening" : "Stops listening") : model.isStarting ? "Cancels starting" : "Starts listening")
-        .sensoryFeedback(.impact(weight: .medium), trigger: model.recording)
+        .sensoryFeedback(.impact(weight: .medium), trigger: taps)
     }
 
     /// The first start downloads speech recognition, which can take minutes: how far it's got.

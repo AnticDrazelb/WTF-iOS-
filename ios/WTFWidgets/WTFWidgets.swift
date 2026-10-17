@@ -206,9 +206,10 @@ struct ListeningLiveActivity: Widget {
             } minimal: {
                 ListeningMark(font: .caption, stale: stale, paused: paused)
             }
-            // A tap on the pill opens WTF to stop listening; holding it shows the buttons. Stale,
-            // as on the card, a tap just opens WTF, which carries on listening: no stop sheet.
-            .widgetURL(stale ? nil : URL(string: "wtf://listening"))
+            // A tap on the pill opens WTF to stop listening; holding it shows the buttons. With an
+            // answer showing, a tap opens Ask at it (it's cut short here), as on the card. Stale, as
+            // on the card, a tap just opens WTF, which carries on listening: no stop sheet.
+            .widgetURL(stale ? nil : URL(string: s.answer != nil ? "wtf://answer" : "wtf://listening"))
             .keylineTint(.gray)
         }
         .supplementalActivityFamilies([.small])

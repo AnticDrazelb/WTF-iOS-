@@ -64,7 +64,8 @@ struct AskView: View {
                         if let last = model.messages.last, !last.fromUser, !last.isError, model.status == nil,
                            last.date > Date().addingTimeInterval(-1800), Brain.notReadyReason == nil,
                            let about = last.about, about.count == 1 {
-                            FollowUps(conversation: about[0]).padding(.top, 6)
+                            // Out to the screen edges, so the chips scroll off the side rather than being cut 16 pt in.
+                            FollowUps(conversation: about[0]).padding(.horizontal, -16).padding(.top, 6)
                         }
                         if let s = model.streaming, !s.isEmpty {
                             Bubble(message: ChatMessage(fromUser: false, text: s), tail: true).padding(.top, 8)
@@ -368,10 +369,10 @@ struct FollowUps: View {
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                Button("Summarise This", systemImage: "text.alignleft") {
+                Button("Summarise this", systemImage: "text.alignleft") {
                     model.ask(Self.summarise, focus: conversation)
                 }
-                Button("What Did I Say I\u{2019}d Do?", systemImage: "checklist") {
+                Button("What did I say I\u{2019}d do?", systemImage: "checklist") {
                     model.ask(Self.promised, focus: conversation)
                 }
             }
@@ -381,6 +382,7 @@ struct FollowUps: View {
             .tint(.primary)
             .font(.subheadline)
         }
+        .contentMargins(.horizontal, 16, for: .scrollContent)
     }
 
     static let summarise = "Summarise this conversation"

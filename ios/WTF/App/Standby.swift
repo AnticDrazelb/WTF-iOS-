@@ -7,7 +7,7 @@ import Foundation
 final class Standby {
     static let shared = Standby()
 
-    private var ready: (text: String, covers: Date, byAI: Bool)?
+    private var ready: (text: String, covers: Date, byAI: Bool, made: Date)?
     private var working = false
     private var last = Date.distantPast
     private var queued = false
@@ -39,7 +39,7 @@ final class Standby {
         defer { working = false }
         let before = generation
         guard let made = await AppModel.shared.workOutRecap(live: "", ai: 15), before == generation else { return }
-        ready = made
+        ready = (made.text, made.covers, made.byAI, Date())
         await ReadAloud.shared.prepare(made.text)
     }
 
@@ -57,7 +57,8 @@ final class Standby {
         let model = AppModel.shared
         let live = LiveTranscriber.shared.recentText(seconds: 30).trimmingCharacters(in: .whitespacesAndNewlines)
         let latestEnd = await model.pipeline.latestConversation()?.end
-        if let ready, ready.byAI, live.isEmpty, ready.covers == latestEnd {
+        // Older than 10 minutes, its "just" would no longer be true: worked out again.
+        if let ready, ready.byAI, live.isEmpty, ready.covers == latestEnd, Date().timeIntervalSince(ready.made) < 600 {
             Log.info("Action button: the answer kept ready was up to date")
             return ready.text
         }

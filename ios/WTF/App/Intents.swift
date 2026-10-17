@@ -145,7 +145,7 @@ struct WTFMenuIntent: AudioPlaybackIntent, LiveActivityIntent {
 extension AppIntent {
     /// What Siri says or shows for an answer. With headphones in, WTF's already reading it into
     /// them: Siri saying it as well would talk over it, and even its short line would cut into
-    /// the reading, so that waits until the reading's about done.
+    /// the reading, so that waits until the reading's about done, and is worded for after it.
     @MainActor
     func answerDialog(_ answer: String) async -> IntentDialog {
         guard ReadAloud.headphonesOn else { return "\(answer)" }
@@ -154,7 +154,7 @@ extension AppIntent {
         let words = Double(answer.split(whereSeparator: \.isWhitespace).count)
         let seconds = min(words / (3 * max(ReadAloud.speed, 0.1)) + 0.5, 15)
         try? await Task.sleep(for: .seconds(seconds))
-        return "Reading it into your headphones."
+        return "That's in Ask too."
     }
 
     /// iOS won't let WTF switch the microphone on from the background: bring WTF forward, where

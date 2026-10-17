@@ -309,7 +309,7 @@ public enum ActionRules {
                 if noun != nil, i + 1 < sentences.count, !eventNoun.test(sentences[i + 1]) { candidates.append(sentences[i + 1]) }
                 candidates.append(sentence)
                 guard let (said, resolved) = candidates.lazy.compactMap({ c in
-                    WhenParser.parse(c, reference: reference, calendar: calendar).map { (c, $0) }
+                    WhenParser.parse(c, reference: reference, calendar: calendar, about: noun?[0] ?? "").map { (c, $0) }
                 }).first else { continue }
                 // "He turned five today": happening already, not one for the calendar.
                 if happeningToday(resolved, conversationStart: reference, calendar: calendar) { continue }
@@ -361,7 +361,8 @@ public enum ActionRules {
             guard let whenText = e.when.flatMap({ $0.isEmpty ? nil : $0 }), !vagueWhen.test(whenText.lowercased()) else { continue }
             let source = sourceLine(e.what + " " + whenText, in: lines)
             let saidAt = reference(source)
-            guard let resolved = WhenParser.parse(whenText, reference: saidAt, calendar: calendar) else { continue }
+            // What it is goes along too: the AI's "Saturday at 8" for dinner is 8pm.
+            guard let resolved = WhenParser.parse(whenText, reference: saidAt, calendar: calendar, about: e.what) else { continue }
             // Today with no time: it's happening, not something to put in the calendar.
             if happeningToday(resolved, conversationStart: saidAt, calendar: calendar) { continue }
             // Only said about the past ("we had dinner at the Crown on Saturday"): it's been.

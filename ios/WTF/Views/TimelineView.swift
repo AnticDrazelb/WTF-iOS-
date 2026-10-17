@@ -156,6 +156,8 @@ struct TimelineView: View {
             } message: {
                 Text("Its transcript, recording and suggestions go too. This can\u{2019}t be undone.")
             }
+            // A tap on the listening pill: the stop sheet can't show over these, so they go.
+            .onChange(of: model.stopSheet) { _, on in if on { renaming = nil; deleting = nil } }
             .navigationDestination(for: Conversation.self) { ConversationView(conversation: $0) }
             .navigationDestination(for: DayRef.self) { DayView(day: $0.day) }
             .toolbar { ToolbarItem(placement: .topBarLeading) { ListeningButton() } }
@@ -165,6 +167,7 @@ struct TimelineView: View {
 
 struct TranscribingRow: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.dynamicTypeSize) private var typeSize
     let pending: Int
 
     var body: some View {
@@ -177,15 +180,29 @@ struct TranscribingRow: View {
                     Text(p.total > 1 ? "Transcribing \(p.done + 1) of \(p.total)\u{2026}" : "Transcribing\u{2026}")
                     ProgressView(value: Double(p.done), total: Double(max(p.total, 1)))
                 }
+            } else if typeSize.isAccessibilitySize {
+                // The button under the words at large text sizes, so neither is squeezed.
+                VStack(alignment: .leading, spacing: 8) {
+                    waiting
+                    transcribeNow
+                }
             } else {
-                Text("\(pending) recording\(pending == 1 ? "" : "s") still to transcribe")
+                waiting
                 Spacer()
-                // A capsule, so it doesn't read as part of the sentence beside it.
-                Button("Transcribe Now") { model.processNow(force: true) }
-                    .buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small)
-                    .sensoryFeedback(.selection, trigger: model.transcribing != nil)
+                transcribeNow
             }
         }
+    }
+
+    private var waiting: some View {
+        Text("\(pending) recording\(pending == 1 ? "" : "s") still to transcribe")
+    }
+
+    // A capsule, so it doesn't read as part of the sentence beside it.
+    private var transcribeNow: some View {
+        Button("Transcribe Now") { model.processNow(force: true) }
+            .buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small)
+            .sensoryFeedback(.selection, trigger: model.transcribing != nil)
     }
 }
 
@@ -193,6 +210,7 @@ struct TranscribingRow: View {
 /// and under it the topics it wandered through; a tangent (after one was left hanging) steps in.
 struct TimelineEntry: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.dynamicTypeSize) private var typeSize
     let conversation: Conversation
 
     /// Only while it's actually being heard: not while a call has the microphone, or once
@@ -201,25 +219,40 @@ struct TimelineEntry: View {
 
     var body: some View {
         let topics = Threads.layout(conversation.threads)
+        // At large text sizes the time goes in the card, not a column beside it, so the card
+        // has the width and the title isn't cut to a word.
+        let large = typeSize.isAccessibilitySize
         HStack(alignment: .top, spacing: 0) {
-            Text(conversation.start, format: .dateTime.hour().minute())
-                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                .frame(minWidth: 58, alignment: .trailing)
-                .fixedSize()
-                .padding(.top, 14).padding(.trailing, 8)
-            // The line, and this conversation's place on it.
-            VStack(spacing: 0) {
-                Rectangle().fill(.quaternary).frame(width: 1.5, height: 16)
-                Circle().fill(live ? Color.primary : Color.secondary).frame(width: 9, height: 9)
-                Rectangle().fill(.quaternary).frame(width: 1.5).frame(maxHeight: .infinity)
+            if !large {
+                Text(conversation.start, format: .dateTime.hour().minute())
+                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    .frame(minWidth: 58, alignment: .trailing)
+                    .fixedSize()
+                    .padding(.top, 14).padding(.trailing, 8)
+                // The line, and this conversation's place on it.
+                VStack(spacing: 0) {
+                    Rectangle().fill(.quaternary).frame(width: 1.5, height: 16)
+                    Circle().fill(live ? Color.primary : Color.secondary).frame(width: 9, height: 9)
+                    Rectangle().fill(.quaternary).frame(width: 1.5).frame(maxHeight: .infinity)
+                }
+                .frame(width: 12)
             }
-            .frame(width: 12)
             VStack(alignment: .leading, spacing: 8) {
                 VStack(alignment: .leading, spacing: 3) {
-                    HStack(alignment: .firstTextBaseline) {
-                        Text(displayTitle(conversation)).font(.headline).lineLimit(2)
-                        Spacer(minLength: 4)
-                        if live { Text("Live").font(.caption.weight(.medium)).foregroundStyle(.secondary) }
+                    if large {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(conversation.start, format: .dateTime.hour().minute())
+                                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                            Spacer(minLength: 4)
+                            if live { Text("Live").font(.caption.weight(.medium)).foregroundStyle(.secondary) }
+                        }
+                        Text(displayTitle(conversation)).font(.headline)
+                    } else {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(displayTitle(conversation)).font(.headline).lineLimit(2)
+                            Spacer(minLength: 4)
+                            if live { Text("Live").font(.caption.weight(.medium)).foregroundStyle(.secondary) }
+                        }
                     }
                     if !preview.isEmpty {
                         Text(preview).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
@@ -240,7 +273,7 @@ struct TimelineEntry: View {
                     .padding(.leading, 4)
                 }
             }
-            .padding(.leading, 10).padding(.vertical, 8)
+            .padding(.leading, large ? 0 : 10).padding(.vertical, 8)
         }
         .fixedSize(horizontal: false, vertical: true)
     }
@@ -480,6 +513,10 @@ struct ConversationView: View {
                 }
                 fixing = nil
             }
+        }
+        // A tap on the listening pill: the stop sheet can't show over these, so they go.
+        .onChange(of: model.stopSheet) { _, on in
+            if on { fixing = nil; renaming = false; naming = nil; confirmDelete = false }
         }
         .confirmationDialog("Delete this conversation?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete", role: .destructive) {

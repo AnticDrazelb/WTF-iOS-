@@ -62,12 +62,15 @@ struct ThreadList: View {
     @Environment(AppModel.self) private var model
     let threads: [TopicThread]
     let onTap: (TopicThread) -> Void
+    /// One width for every status's symbol, so the titles line up (the bubble's wider than the circles).
+    @ScaledMetric private var iconWidth: CGFloat = 24
 
     var body: some View {
         ForEach(threads) { t in
             Button { onTap(t) } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Image(systemName: icon(t)).foregroundStyle(t.status == .current || t.status == .hanging ? Color.primary : Color.secondary)
+                        .frame(width: iconWidth)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(t.title).foregroundStyle(.primary)
                         if let facts = t.facts, !facts.isEmpty {

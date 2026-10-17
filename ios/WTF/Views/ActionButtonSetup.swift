@@ -102,7 +102,10 @@ struct MoreWaysView: View {
             way("list.bullet", "WTF Menu", ActionButtonSetupView.hasActionButton
                 ? "Rather choose each time? In Settings › Action Button, pick WTF Menu instead of What Was I Saying?"
                 : "Rather choose each time? Use WTF Menu for Back Tap instead of What Was I Saying?")
-            way("lock", "Lock Screen", "Hold the Lock Screen, tap Customise, then swap the torch or camera for a WTF button.")
+            // Only Face ID iPhones have the torch and camera on the Lock Screen to swap.
+            if !ActionButtonSetupView.hasHomeButton {
+                way("lock", "Lock Screen", "Hold the Lock Screen, tap Customise, then swap the torch or camera for a WTF button.")
+            }
             way("switch.2", "Control Center", ActionButtonSetupView.hasHomeButton
                 ? "Swipe up from the bottom edge, tap +, then Add a Control, and pick WTF."
                 : "Swipe down from the top-right corner, tap +, then Add a Control, and pick WTF.")
