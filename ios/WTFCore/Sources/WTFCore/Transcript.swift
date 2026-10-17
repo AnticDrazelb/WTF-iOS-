@@ -132,7 +132,8 @@ public enum ListAnswers {
 
     /// [calendar]: its time zone and locale, so times read as the person's own (12- or 24-hour).
     public static func answer(_ question: String, open: [Item], now: Date = Date(), calendar: Calendar = .current) -> String? {
-        let q = question.lowercased()
+        // Typed with curly apostrophes ("What’s on tomorrow?") it's the same question.
+        let q = Prompts.plain(question).lowercased()
         // Only clear list questions; anything about the past goes to the AI.
         if Rx(#"\b(was|were|said|saying|earlier|yesterday|did|tell|told|decide|decided|happen|happened|who|why|talk|talked|discuss|discussed|mention|mentioned|should)\b"#).test(q) { return nil }
         if forSomeone.test(question) { return nil }

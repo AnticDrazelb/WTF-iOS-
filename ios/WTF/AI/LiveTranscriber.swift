@@ -51,6 +51,8 @@ final class LiveTranscriber: @unchecked Sendable {
     /// A start is setting up a recogniser: a second start meanwhile (a revival racing the
     /// Listen button) does nothing, rather than making another.
     private var opening = false
+    /// Bumped by every stop, so a start that was still setting up when one came knows it's not wanted.
+    private var generation = 0
 
     private let source = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: rate, channels: 1, interleaved: false)!
 
@@ -63,10 +65,10 @@ final class LiveTranscriber: @unchecked Sendable {
 
     /// [reviving]: started again after it stopped by itself (see revive), not by listening starting.
     func start(reviving: Bool = false) async {
-        guard locked({ () -> Bool in
-            guard self.analyzer == nil, !self.opening else { return false }
+        guard let mine = locked({ () -> Int? in
+            guard self.analyzer == nil, !self.opening else { return nil }
             self.opening = true
-            return true
+            return self.generation
         }) else { return }
         defer { locked { self.opening = false } }
         guard await SpeechEngine.shared.isReady() else { return }
@@ -86,7 +88,11 @@ final class LiveTranscriber: @unchecked Sendable {
             // files instead of each waiting for words that won't come; and start it again shortly.
             if await self?.stopIfCurrent(analyzer) == true { self?.revive() }
         }
-        locked {
+        // Stopped while it was setting up (or listening stopped while a revival waited): nothing's
+        // left running, as a stop that came meanwhile had nothing yet to stop.
+        let stillWanted = !reviving || Recorder.shared.running
+        guard locked({ () -> Bool in
+            guard stillWanted, self.generation == mine else { return false }
             self.analyzer = analyzer
             self.input = continuation
             self.results = results
@@ -100,6 +106,12 @@ final class LiveTranscriber: @unchecked Sendable {
             finalThrough = 0
             since = Date()
             dropped = []
+            return true
+        }) else {
+            continuation.finish()
+            results.cancel()
+            Task { await analyzer.cancelAndFinishNow() }
+            return
         }
         Task { [weak self] in
             do { try await analyzer.start(inputSequence: stream) } catch {
@@ -174,6 +186,7 @@ final class LiveTranscriber: @unchecked Sendable {
         let (analyzer, input, results) = locked { () -> (SpeechAnalyzer?, AsyncStream<AnalyzerInput>.Continuation?, Task<Void, Never>?) in
             // The words it held go too: nothing heard before a stop is answered from after it.
             defer {
+                generation += 1
                 self.analyzer = nil; self.input = nil; self.results = nil; since = nil
                 words = []; provisional = []
             }
@@ -296,6 +309,12 @@ final class LiveTranscriber: @unchecked Sendable {
         while locked({ finalThrough }) < target - 0.05 {
             guard Date() < deadline else {
                 Log.error("Live transcription fell behind; transcribing the recording from its file")
+                // Its words aren't wanted now, nor any from before it (recordings are taken in
+                // order): let go, so a recogniser that's always behind doesn't hold the whole day.
+                locked {
+                    words.removeAll { $0.chunk <= from.addingTimeInterval(0.001) }
+                    ends = ends.filter { $0.key > from.addingTimeInterval(0.001) }
+                }
                 return nil
             }
             try? await Task.sleep(for: .milliseconds(50))

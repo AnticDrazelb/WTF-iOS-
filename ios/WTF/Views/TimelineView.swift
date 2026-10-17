@@ -94,9 +94,11 @@ struct TimelineView: View {
                                     Button("Rename\u{2026}", systemImage: "pencil") { newTitle = c.title ?? ""; renaming = c.id }
                                     Button("Delete", systemImage: "trash", role: .destructive) { deleting = c.id }
                                 }
-                                // As in Lists: swipe to delete.
-                                .swipeActions(edge: .trailing) {
-                                    Button("Delete", systemImage: "trash", role: .destructive) { deleting = c.id }
+                                // As in Lists: swipe to delete. Not a destructive role or a full swipe: those
+                                // slide the row away before it's confirmed, and back again on Cancel.
+                                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                    Button("Delete", systemImage: "trash") { deleting = c.id }
+                                        .tint(.red)
                                 }
                         }
                     } header: {
@@ -167,11 +169,12 @@ struct TranscribingRow: View {
                     Text(p.total > 1 ? "Transcribing \(p.done + 1) of \(p.total)\u{2026}" : "Transcribing\u{2026}")
                     ProgressView(value: Double(p.done), total: Double(max(p.total, 1)))
                 }
-                ProgressView()
             } else {
                 Text("\(pending) recording\(pending == 1 ? "" : "s") still to transcribe")
                 Spacer()
+                // A capsule, so it doesn't read as part of the sentence beside it.
                 Button("Transcribe Now") { model.processNow() }
+                    .buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small)
                     .sensoryFeedback(.selection, trigger: model.transcribing != nil)
             }
         }
@@ -404,8 +407,10 @@ struct ConversationView: View {
                 Button("Delete Conversation", role: .destructive) { confirmDelete = true }
             }
         }
+        // Kept for the back button's history, but not shown: the heading above has it in full.
         .navigationTitle(displayTitle(conversation))
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar { ToolbarItem(placement: .principal) { Text("").accessibilityHidden(true) } }
         // So a conversation going past keeping closes this page only if it's this one.
         .onAppear { model.onScreen.insert(conversation.id) }
         .onDisappear { model.onScreen.remove(conversation.id) }
@@ -468,9 +473,13 @@ struct ConversationView: View {
         .confirmationDialog("Delete this conversation?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete", role: .destructive) {
                 let id = conversation.id
+                // Its page closes itself: the day it came from stays open behind it, unless this
+                // was all of that day, when the Timeline goes back to the top.
+                let day = Calendar.current.startOfDay(for: conversation.start)
+                let next = Calendar.current.date(byAdding: .day, value: 1, to: day) ?? day
+                let sameDay = (try? model.container.mainContext.fetchCount(FetchDescriptor<Conversation>(predicate: #Predicate<Conversation> { $0.start >= day && $0.start < next }))) ?? 0
                 dismiss()
-                // Its page closes itself: the day it came from stays open behind it.
-                Task { await model.deleteConversation(id, fromItsPage: true) }
+                Task { await model.deleteConversation(id, fromItsPage: sameDay > 1) }
             }
         } message: {
             Text("Its transcript, recording and suggestions go too. This can\u{2019}t be undone.")
@@ -532,6 +541,7 @@ struct ConversationView: View {
 struct FixWordsSheet: View {
     @Binding var text: String
     let done: (Bool) -> Void
+    @FocusState private var focused: Bool
 
     var body: some View {
         NavigationStack {
@@ -539,18 +549,22 @@ struct FixWordsSheet: View {
                 Section {
                     TextField("What was said", text: $text, axis: .vertical)
                         .lineLimit(3...12)
+                        .focused($focused)
                 } footer: {
                     Text("Change only what was misheard. WTF learns the correction, so the same mistake is caught next time.")
                 }
             }
             .navigationTitle("Fix Words")
             .navigationBarTitleDisplayMode(.inline)
+            // Straight to typing, as it's what the sheet is for.
+            .onAppear { focused = true }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { done(false) } }
                 ToolbarItem(placement: .topBarTrailing) { Button("Save") { done(true) }.fontWeight(.semibold).disabled(text.trimmingCharacters(in: .whitespaces).isEmpty) }
             }
         }
-        .presentationDetents([.medium])
+        // Taller on a drag, for a long line with the keyboard up.
+        .presentationDetents([.medium, .large])
     }
 }
 

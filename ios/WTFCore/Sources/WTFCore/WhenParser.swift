@@ -70,6 +70,8 @@ public enum WhenParser {
     /// [reference]'s wall-clock fields matter, not its zone: pass the conversation's local time.
     public static func parse(_ phrase: String, reference: DateComponents) -> WhenResult? {
         var q = phrase.lowercased()
+        // "Saturday 14th" is Saturday the 14th (not "Saturday 14", which may be a time).
+        q = Rx(#"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+(\d{1,2})(st|nd|rd|th)\b"#).replace(q, with: "$1 the $2$3")
         q = Rx(#"(\d)(st|nd|rd|th)\b"#).replace(q, with: "$1")
         q = q.replacingOccurrences(of: "a.m.", with: "am").replacingOccurrences(of: "p.m.", with: "pm").replacingOccurrences(of: "o'clock", with: "")
         // "8pm" has no word break between the 8 and the pm: part them so the pm is heard.
@@ -105,7 +107,7 @@ public enum WhenParser {
     static let explicitDate: Rx = {
         let monthNames = "january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec"
         let ords = ordinals.map(\.0).joined(separator: "|")
-        return Rx(#"\bthe\s+(\d{1,2}"# + notACount + #"|(twenty[ -])?("# + ords + #"))\b|\b\d{1,2}\s+(of\s+)?("# + monthNames + #")\b(?!\s+be\b)|\b("# + monthNames + #")\s+\d{1,2}\b|\b\d{1,2}/\d{1,2}\b"#)
+        return Rx(#"\bthe\s+(\d{1,2}"# + notACount + #"|(twenty[ -])?("# + ords + #"))\b|\b\d{1,2}\s+(of\s+)?("# + monthNames + #")\b(?!\s+be\b)|\b("# + monthNames + #")\s+(the\s+)?\d{1,2}\b|\b\d{1,2}/\d{1,2}\b"#)
     }()
 
     /// "the 4 of us", "the 2 kids": a count, not the 4th or the 2nd.
@@ -127,6 +129,10 @@ public enum WhenParser {
     }
 
     private static func parseDate(_ q: String, today: Day) -> Day? {
+        // "Last Friday" has been: not a date to plan for.
+        if Rx(#"\blast\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|week|weekend)\b"#).test(q) { return nil }
+        // "A week today", "a week tomorrow".
+        if let m = Rx(#"\ba week (today|tomorrow)\b"#).first(q) { return today.plus(days: m[1] == "today" ? 7 : 8) }
         if Rx(#"\bday after tomorrow\b"#).test(q) { return today.plus(days: 2) }
         if Rx(#"\b(tomorrow|tmrw)\b"#).test(q) { return today.plus(days: 1) }
         if Rx(#"\b(today|tonight|this (morning|afternoon|evening))\b"#).test(q) { return today }
@@ -135,7 +141,8 @@ public enum WhenParser {
         for m in Rx(#"\b(\d{1,2})\s+(?:of\s+)?([a-z]+)\b(?!\s+be\b)"#).all(q) {
             if let month = months[m[2]] { return nextDate(today, month: month, day: Int(m[1])!) }
         }
-        for m in Rx(#"\b([a-z]+)\s+(\d{1,2})\b"#).all(q) {
+        // "December 3", "March the 1st".
+        for m in Rx(#"\b([a-z]+)\s+(?:the\s+)?(\d{1,2})\b"#).all(q) {
             if let month = months[m[1]] { return nextDate(today, month: month, day: Int(m[2])!) }
         }
         if let m = Rx(#"\b(\d{1,2})/(\d{1,2})\b"#).first(q), let month = Int(m[2]), (1...12).contains(month) {
@@ -143,11 +150,19 @@ public enum WhenParser {
         }
 
         // Weekdays: "Thursday" = the next one; "next Thursday" = the one in the following week;
-        // "this Friday" said on a Friday is today.
+        // "this Friday" said on a Friday is today. "Tuesday week" and "a week on Tuesday" are a week after.
+        if let m = Rx(#"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday) week\b|\ba week (?:on|from) (monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"#).first(q) {
+            return today.next(days[m[1].isEmpty ? m[2] : m[1]]!).plus(days: 7)
+        }
         if let m = Rx(#"\b(next|this|on)?\s*(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"#).first(q) {
             var d = today.next(days[m[2]]!, orSame: m[1] == "this")
             if m[1] == "next" && d < today.next(2) { d = d.plus(days: 7) }
             return d
+        }
+        // "Next weekend", like "next Saturday": the one in the following week.
+        if Rx(#"\bnext weekend\b"#).test(q) {
+            let d = today.next(7, orSame: true)
+            return d < today.next(2) ? d.plus(days: 7) : d
         }
         if Rx(#"\b(this )?weekend\b"#).test(q) { return today.next(7, orSame: true) }
         if Rx(#"\bnext week\b"#).test(q) { return today.next(2) }
@@ -206,7 +221,11 @@ public enum WhenParser {
         }
         if Rx(#"\b(noon|midday|lunchtime)\b"#).test(q) { return (12, 0) }
         // "Friday at midnight" means the end of Friday, not the start of it (Thursday night).
-        if Rx(#"\bmidnight\b"#).test(q) { return (23, 59) }
+        // So does "12 tonight", not noon.
+        if Rx(#"\bmidnight\b|\b12\s+(?:tonight|at night)\b"#).test(q) ||
+            (Rx(#"\b(?:at|by|from)\s+12\b(?!\s*(?:[:.]\d|am|pm))"#).test(q) && Rx(#"\btonight\b"#).test(q) && !Rx(#"\b(noon|midday|lunch)"#).test(q)) {
+            return (23, 59)
+        }
         if let m = Rx(#"\b(\d{1,2})[:.](\d{2})\s*(am|pm)?\b"#).first(q) {
             return (clock(Int(m[1])!, m[3]), min(max(Int(m[2])!, 0), 59))
         }
@@ -222,6 +241,10 @@ public enum WhenParser {
             return m[2] == "past" ? (h % 24, mins) : ((h + 23) % 24, 60 - mins)
         }
         if let m = Rx(#"\b"# + num + #"\s*(am|pm)\b"#).first(q), (1...12).contains(n(m[1])) { return (clock(n(m[1]), m[2]), 0) }
+        // "11 tonight": an hour said with no "at" (not "the one tonight").
+        if let m = Rx(#"(?<!\b(?:no|the|this|that|which|any) )\b"# + num + #"\s+(?:tonight|this evening|in the evening)\b"#).first(q), (1...12).contains(n(m[1])) {
+            return (adjust(n(m[1])) % 24, 0)
+        }
         if let m = Rx(#"\b(?:at|for|from|by)\s+"# + num + #"\b(?!\s*(?:st|nd|rd|th|minutes|mins|people|of))"#).first(q) {
             let h = n(m[1])
             if (1...12).contains(h) { return (adjust(h) % 24, 0) }

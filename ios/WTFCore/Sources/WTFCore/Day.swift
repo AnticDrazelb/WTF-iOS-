@@ -68,7 +68,8 @@ extension Prompts {
     /// from each in turn, while they fit in [budget] tokens. [today]: it isn't over yet.
     public static func day(_ notes: [DayNote], today: Bool, budget: Int = 1_800) -> String {
         let f = DateFormatter()
-        f.dateFormat = "HH:mm"
+        // The iPhone's own clock (12 or 24 hours): the AI copies these times into the recap.
+        f.setLocalizedDateFormatFromTemplate("jmm")
         var sorted = notes.sorted { $0.start < $1.start }
         var heads = sorted.map { "\(f.string(from: $0.start)) \($0.title)" }
         var used = heads.reduce(0) { $0 + tokens($1) }

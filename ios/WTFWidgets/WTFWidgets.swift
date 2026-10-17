@@ -145,8 +145,9 @@ struct ListeningLiveActivity: Widget {
                 .activityBackgroundTint(Look.glass)
                 .activitySystemActionForegroundColor(.white)
                 // Stale, a tap just opens WTF, which carries on listening as it opens: no question,
-                // and no sheet offering to stop what it's only just started again.
-                .widgetURL(context.isStale ? nil : URL(string: "wtf://ask"))
+                // and no sheet offering to stop what it's only just started again. With an answer
+                // showing, a tap opens Ask at it (it's cut short here) rather than asking again.
+                .widgetURL(context.isStale ? nil : URL(string: context.state.answer != nil ? "wtf://answer" : "wtf://ask"))
         } dynamicIsland: { context in
             let s = context.state
             // WTF stopped updating it (closed, or crashed): nothing in the pill may say it's listening.
@@ -193,7 +194,12 @@ struct ListeningLiveActivity: Widget {
             } compactTrailing: {
                 // A fixed width: a running time left to size itself fills the whole island.
                 if stale || paused {
-                    Color.clear.frame(width: 40)
+                    Text(stale ? "Off" : "Paused")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Look.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
+                        .frame(width: 40)
                 } else {
                     Elapsed(since: s.since, font: .caption2, alignment: .center).frame(width: 40)
                 }
@@ -268,9 +274,15 @@ struct LockScreenCard: View {
             }
             .padding(8)
         } else if stale {
-            Label("Not listening. Open WTF to carry on.", systemImage: "mic.slash")
-                .font(.headline).foregroundStyle(.white).padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            // Stop as in the stale pill: without a Dynamic Island, this is the only one.
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Not listening. Open WTF to carry on.", systemImage: "mic.slash")
+                    .font(.headline).foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                CapsuleButton(intent: WTFStopControlIntent(), icon: "stop.fill", label: "Stop")
+            }
+            .padding(12)
+            .dynamicTypeSize(...DynamicTypeSize.xLarge)
         } else {
             // Kept under iOS's 160 points: heading, then the trail and the buttons, or an answer
             // (which takes the topic's place) and its buttons: 12 + 22 + 8 + 54 + 8 + 34 + 12 at most,

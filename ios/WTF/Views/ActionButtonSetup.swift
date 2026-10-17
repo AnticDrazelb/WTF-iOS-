@@ -39,27 +39,32 @@ struct ActionButtonSetupView: View {
     }
 
     /// iPhone 15 Pro and later (iPhone16,1 on) have an Action button; iOS 26 also runs on older
-    /// iPhones and on the iPhone 15 and 15 Plus (iPhone15,4 and 15,5), which don't. Anything that
-    /// isn't an iPhone (the Simulator) is taken to have one.
+    /// iPhones and on the iPhone 15 and 15 Plus (iPhone15,4 and 15,5), which don't. Nor does an
+    /// iPad or a Mac running WTF.
     static let hasActionButton: Bool = {
-        guard let phone = iPhone else { return true }
+        guard let phone = iPhone else { return false }
         return phone.major >= 16
     }()
 
     /// The iPhone 14 Pro (iPhone15,2 and 15,3), the 15 (15,4 and 15,5) and later have a Dynamic
     /// Island, so a listening pill; the iPhone 16e and 17e (iPhone17,5 and 18,5) and older iPhones
-    /// don't, and show only the Lock Screen card. Anything that isn't an iPhone is taken to have one.
+    /// don't, and show only the Lock Screen card. An iPad or a Mac running WTF has none.
     static let hasDynamicIsland: Bool = {
-        guard let phone = iPhone else { return true }
+        guard let phone = iPhone else { return false }
         if ["iPhone17,5", "iPhone18,5"].contains(phone.machine) { return false }
         return phone.major >= 16 || ["iPhone15,2", "iPhone15,3", "iPhone15,4", "iPhone15,5"].contains(phone.machine)
     }()
 
-    /// The model identifier ("iPhone17,1") and its first number, or nil if this isn't an iPhone.
+    /// The model identifier ("iPhone17,1") and its first number, or nil if this isn't an iPhone. The
+    /// Simulator says which iPhone it's pretending to be.
     private static let iPhone: (machine: String, major: Int)? = {
+        #if targetEnvironment(simulator)
+        let machine = ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"] ?? ""
+        #else
         var name = utsname()
         uname(&name)
         let machine = withUnsafeBytes(of: name.machine) { String(decoding: $0.prefix(while: { $0 != 0 }), as: UTF8.self) }
+        #endif
         guard machine.hasPrefix("iPhone"), let major = Int(machine.dropFirst(6).prefix(while: { $0.isNumber })) else { return nil }
         return (machine, major)
     }()

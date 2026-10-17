@@ -157,7 +157,7 @@ final class ThreadsTests: XCTestCase {
         let ten = Calendar.current.date(bySettingHour: 10, minute: 0, second: 0, of: t0)!
         let s = QuickRecap.spoken(t, start: ten, now: ten.addingTimeInterval(20))!
         XCTAssertTrue(s.hasPrefix("You were saying, 17 seconds ago: Well I was going"), s)
-        XCTAssertTrue(s.hasSuffix("lovely little\u{2026} Then Speaker 2 cut in."), s)
+        XCTAssertTrue(s.hasSuffix("lovely little\u{2026} Then someone cut in."), s)
     }
 
     func testSpokenRecapDoesntCallAnUnknownVoiceSpeech() {

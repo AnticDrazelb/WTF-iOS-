@@ -243,16 +243,21 @@ public enum CalendarCheck {
             return heard.isSubset(of: significant(e.title))
         }
         if already { return .alreadyThere }
+        // The person's own clock (12 or 24 hours), with "pm" rather than "PM".
         let f = DateFormatter()
-        f.calendar = calendar; f.timeZone = calendar.timeZone; f.locale = Locale(identifier: "en_GB")
+        f.calendar = calendar; f.timeZone = calendar.timeZone; f.locale = calendar.locale ?? .current
+        func said(_ d: Date) -> String {
+            f.string(from: d).replacingOccurrences(of: "\u{202F}", with: " ")
+                .replacingOccurrences(of: "AM", with: "am").replacingOccurrences(of: "PM", with: "pm")
+        }
         if let e = sameDay.first(where: { !$0.allDay && !allDay && heard.isSubset(of: significant($0.title)) }) {
-            f.dateFormat = "h:mm a"
-            return .differs("Your calendar has it at \(f.string(from: e.start).lowercased())")
+            f.setLocalizedDateFormatFromTemplate("jmm")
+            return .differs("Your calendar has it at \(said(e.start))")
         }
         let elsewhere = matches.filter { !calendar.isDate($0.start, inSameDayAs: start) && heard.isSubset(of: significant($0.title)) }
         guard let nearest = elsewhere.min(by: { abs($0.start.timeIntervalSince(start)) < abs($1.start.timeIntervalSince(start)) }) else { return nil }
-        f.dateFormat = nearest.allDay ? "EEEE d MMMM" : "EEEE d MMMM 'at' h:mm a"
-        return .differs("Your calendar has it on \(f.string(from: nearest.start).replacingOccurrences(of: "AM", with: "am").replacingOccurrences(of: "PM", with: "pm"))")
+        f.setLocalizedDateFormatFromTemplate(nearest.allDay ? "EEEEdMMMM" : "EEEEdMMMMjmm")
+        return .differs("Your calendar has it on \(said(nearest.start))")
     }
 
     static let generic: Set<String> = ["appointment", "appt", "meeting", "call", "event", "booking", "check", "up", "reminder", "day",

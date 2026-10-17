@@ -90,7 +90,8 @@ final class EdgeCaseTests: XCTestCase {
         let r = QuickRecap.of(t, start: start, now: now, calendar: london)
         XCTAssertNotNil(r)
         XCTAssertTrue(r?.hasPrefix("Speaker 2 was saying") ?? false, r ?? "")
-        XCTAssertTrue(QuickRecap.spoken(t, start: start, now: now, calendar: london)?.hasPrefix("Speaker 2 was saying") ?? false)
+        // Read aloud, an unnamed voice is "someone", not "Speaker 2".
+        XCTAssertTrue(QuickRecap.spoken(t, start: start, now: now, calendar: london)?.hasPrefix("Someone was saying") ?? false)
     }
 
     func testTheVoiceTipCanBeLeftOut() {

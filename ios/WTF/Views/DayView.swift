@@ -25,6 +25,15 @@ private func written(_ conversations: [Conversation]) -> [DayNote] {
 
 private func clock(_ d: Date) -> String { d.formatted(date: .omitted, time: .shortened) }
 
+extension DayDigests {
+    /// The day's last recap, while it can still stand: not once nothing summarised is left (a
+    /// conversation deleted, its recap not yet forgotten), and not after a delete has forgotten
+    /// it while a new one was being written. Otherwise a deleted conversation stays described.
+    static func lastStanding(for day: Date, notes: [DayNote]) -> String? {
+        notes.isEmpty ? nil : shared.last(for: day)
+    }
+}
+
 /// The top of each day in the Timeline: a few sentences on the whole of it, and how much got
 /// settled, is still to do and was left hanging. Tap for all of it.
 struct YourDayRow: View {
@@ -65,10 +74,10 @@ struct YourDayRow: View {
         .padding(.vertical, 4)
         .animation(.default, value: recap)
         .task(id: DayDigests.fingerprint(toWrite)) {
-            recap = DayDigests.shared.last(for: day)
+            recap = DayDigests.lastStanding(for: day, notes: toWrite)
             guard recent else { return }
             writing = DayDigests.shared.needsWriting(day, notes: toWrite)
-            if let fresh = await DayDigests.shared.recap(for: day, notes: toWrite) { recap = fresh }
+            recap = await DayDigests.shared.recap(for: day, notes: toWrite) ?? DayDigests.lastStanding(for: day, notes: toWrite)
             writing = false
         }
     }
@@ -142,9 +151,9 @@ struct DayView: View {
         .onAppear { model.daysOnScreen.insert(Calendar.current.startOfDay(for: day)) }
         .onDisappear { model.daysOnScreen.remove(Calendar.current.startOfDay(for: day)) }
         .task(id: DayDigests.fingerprint(toWrite)) {
-            recap = DayDigests.shared.last(for: day)
+            recap = DayDigests.lastStanding(for: day, notes: toWrite)
             writing = DayDigests.shared.needsWriting(day, notes: toWrite)
-            if let fresh = await DayDigests.shared.recap(for: day, notes: toWrite) { recap = fresh }
+            recap = await DayDigests.shared.recap(for: day, notes: toWrite) ?? DayDigests.lastStanding(for: day, notes: toWrite)
             writing = false
         }
     }

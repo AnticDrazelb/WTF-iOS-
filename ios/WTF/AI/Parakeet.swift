@@ -15,11 +15,25 @@ actor Parakeet {
 
     /// The switch in Settings.
     static var enabled: Bool { UserDefaults.standard.bool(forKey: "parakeet") }
-    /// The model's on the phone.
-    static var downloaded: Bool { UserDefaults.standard.bool(forKey: "parakeetDownloaded") }
-    /// English only (that's the model): in any other language Apple's is used. The iPhone's own
-    /// language, not Locale.current: WTF ships only in English, so that's always English.
-    static var suitable: Bool { Locale(identifier: Locale.preferredLanguages.first ?? "en-US").language.languageCode == .english }
+    /// The model's on the phone. The setting alone doesn't say so: settings come back from a
+    /// backup and the model doesn't, and then it'd be downloaded unasked, over mobile data too,
+    /// when a conversation's heard again. Put right here, so Settings offers the download again.
+    static var downloaded: Bool {
+        guard UserDefaults.standard.bool(forKey: "parakeetDownloaded") else { return false }
+        guard FileManager.default.fileExists(atPath: AsrModels.defaultCacheDirectory(for: .v2).path) else {
+            UserDefaults.standard.set(false, forKey: "parakeetDownloaded")
+            return false
+        }
+        return true
+    }
+    /// English only (that's the model): in any other language Apple's is used. The language WTF
+    /// transcribes in, if it's said ("transcribesEnglish"): that's English when the iPhone's
+    /// language has no recogniser of its own. Otherwise the iPhone's own language, not
+    /// Locale.current: WTF ships only in English, so that's always English.
+    static var suitable: Bool {
+        if let english = UserDefaults.standard.object(forKey: "transcribesEnglish") as? Bool { return english }
+        return Locale(identifier: Locale.preferredLanguages.first ?? "en-US").language.languageCode == .english
+    }
     /// It's switched on, downloaded and suits the language.
     static var inUse: Bool { enabled && downloaded && suitable }
 
@@ -39,7 +53,10 @@ actor Parakeet {
         // and is told how far it's got too.
         if let loading {
             if let progress { watching.add(progress) }
-            _ = try await loading.value
+            let loaded = try await loading.value
+            // The one loading it may not have carried on yet (which goes first isn't fixed): it's
+            // ready either way, unless it was stopped.
+            if manager == nil, !loading.isCancelled { manager = loaded }
             return
         }
         let watching = Watchers()
@@ -91,14 +108,15 @@ actor Parakeet {
 
     private func wordsNow(_ url: URL) async throws -> [SpeakerAlign.Word] {
         // Switched off while this waited its turn: not downloaded again (Apple's is used).
-        guard Self.enabled else { throw NotLoaded() }
-        try await prepare()
-        guard let manager else { throw NotLoaded() }
+        guard Self.enabled, Self.downloaded else { throw NotLoaded() }
+        // Marked first, so Settings' unload can't let go of the model while this waits for it to load.
         transcribing = true
         defer {
             transcribing = false
             release()
         }
+        try await prepare()
+        guard let manager else { throw NotLoaded() }
         var state = TdtDecoderState.make(decoderLayers: await manager.decoderLayerCount)
         let result = try await manager.transcribe(url, decoderState: &state)
         return Self.words(from: result.tokenTimings ?? [])

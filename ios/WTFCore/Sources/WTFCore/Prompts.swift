@@ -9,16 +9,28 @@ public enum Prompts {
     static let commitment = Rx(#"promis|said i'?d|i said i would|to-?do|commit|agreed to|supposed to|\bowe\b|need to do|have to do"#)
     static let digest = Rx(#"summar|recap|my day|overview|what did i do\b(?!\s+(with|about))|what have i (done|been doing)|everything"#)
     /// Not any "just" or "where was I with…": "I just can't remember Tom's address" is a question of its own.
-    static let latest = Rx(#"\b(what|where) (was|were|did) (i|we|he|she|they) just\b|\b(i|we) (was|were) just (saying|talking|on)\b|\b(this|that|the last|the latest) conversation\b|\bjust (now|said|saying)\b|a (minute|moment|sec|second)s? ago|right now|where was i\b(?!\s+with)|lost (my|the) (train|thread)|interrupted|on about|what was i (just )?(saying|talking|on)|where were we|what were we (just )?(saying|talking|on)|remind me what (i|we) (was|were) (saying|talking)|last thing (i|we) said"#)
+    static let latest = Rx(#"\b(what|where) (was|were|did) (i|we|he|she|they) just\b|\b(i|we) (was|were) just (saying|talking|on)\b|\bjust (now|said|saying)\b|a (minute|moment|sec|second)s? ago|where was i\b(?!\s+with)|lost (my|the) (train|thread)|\bon about\b|what was i (just )?(saying|talking|on)|where were we|what were we (just )?(saying|talking|on)|remind me what (i|we) (was|were) (saying|talking)|last thing (i|we) said|^\W*wtf\W*$|\bwtf (was|were) (that|i|we)\b"#)
+    /// The latest conversation only if nothing else is named: "What was that conversation with Tom
+    /// about?" is about Tom's, wherever it is.
+    static let vagueLatest = Rx(#"\b(this|that|the last|the latest) conversation\b|right now|interrupted"#)
+    /// Words that ask for the latest or a recap, not what it was about.
+    static let askingWords: Set<String> = ["last", "latest", "right", "now", "interrupted", "interrupt", "thing", "minute", "moment", "second",
+                                           "sec", "ago", "summarise", "summarize", "summary", "recap", "happened", "happen", "going", "again",
+                                           "sorry", "wtf"]
     static let timeWords = Rx(#"\b(yesterday|this morning|last night|earlier|today|afternoon|evening|lunch|hours? ago)\b"#)
 
     public static func intent(_ question: String) -> RecallIntent {
-        let q = question.lowercased()
+        let q = plain(question).lowercased()
         if commitment.test(q) { return .commitments }
         // Before the recap: "summarise what we were just talking about" is about the latest talk, not the day.
-        if latest.test(q) && !timeWords.test(q) { return .latest }
+        if !timeWords.test(q), latest.test(q) || (vagueLatest.test(q) && Set(keywords(q)).subtracting(askingWords).isEmpty) { return .latest }
         if digest.test(q) { return .digest }
         return .focused
+    }
+
+    /// [s] with straight apostrophes: the keyboard types "What’s on", the patterns say "what's".
+    public static func plain(_ s: String) -> String {
+        s.replacingOccurrences(of: "\u{2019}", with: "'").replacingOccurrences(of: "\u{2018}", with: "'")
     }
 
     /// Roughly 4 characters a token in English.
@@ -75,7 +87,7 @@ public enum Prompts {
     /// "What was I just on about?": only the last few minutes of the latest conversation.
     public static func latest(question: String, transcript: String, topic: String?, now: Date, background: String = "", start: Date? = nil) -> String {
         """
-        \(background)The most recent conversation\(topic.map { " (topic: \($0))" } ?? ""), in order, oldest first, each line with the time it was said; the last line is the most recent:
+        \(background)The most recent conversation\(topic.map { " (topic: \($0))" } ?? ""), in order, oldest first; the last line is the most recent:
         \(tail(TranscriptFormat.compact(transcript), budget: background.isEmpty ? 900 : 700))
 
         (It's \(clock(now)) now.\(when(start, now: now))) In 2 or 3 sentences, tell me what I was just talking about. If my last words trail off \
@@ -119,9 +131,16 @@ public enum Prompts {
 
     /// "Summarise my day so far", "what did I do today?": today's recap. Not another day's
     /// ("yesterday", "Friday's meeting", a birthday), which is looked for like any other question.
+    /// Nor one thing from today ("Summarise today's meeting with Tom"), which is looked for too.
     public static func isAboutToday(_ question: String) -> Bool {
-        todayWords.test(question) && !otherDay.test(question)
+        let q = plain(question)
+        return todayWords.test(q) && !otherDay.test(q) && Set(keywords(q)).subtracting(dayWords).isEmpty
     }
+    /// Words that ask about the whole day, not something in it.
+    static let dayWords: Set<String> = ["summarise", "summarize", "summary", "recap", "day", "far", "everything", "done", "doing", "overview",
+                                        "today's", "happened", "happen", "conversations", "give", "quick", "brief", "short", "please",
+                                        "can", "could", "whole", "all", "much", "what's", "going", "been", "get", "got", "wtf",
+                                        "how's", "looking", "gone", "went", "busy", "sum", "catch", "rundown", "run", "through"]
     static let todayWords = Rx(#"\b(my day|today|the day so far)\b"#)
     static let otherDay = Rx(#"\b(yesterday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|birthday|last (night|week))\b"#)
 
@@ -200,7 +219,7 @@ public enum Prompts {
     public static func keywords(_ question: String) -> [String] {
         let stop: Set<String> = ["the", "and", "was", "were", "what", "when", "where", "who", "why", "how", "did", "does", "about", "with",
                                  "that", "this", "they", "them", "said", "say", "tell", "remind", "remember", "earlier", "today",
-                                 "yesterday", "just", "you", "your", "have", "had", "has", "been", "talking", "saying", "conversation"]
+                                 "yesterday", "just", "you", "your", "have", "had", "has", "been", "talking", "saying", "conversation", "wtf"]
         var seen = Set<String>()
         return Rx(#"[A-Za-z][A-Za-z']+"#).all(question).map { $0[0].lowercased() }
             .filter { $0.count >= 3 && !stop.contains($0) && seen.insert($0).inserted }

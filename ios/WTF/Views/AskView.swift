@@ -9,6 +9,8 @@ struct AskView: View {
     @State private var input = ""
     @FocusState private var typing: Bool
     @State private var confirmClear = false
+    /// At (or near) the latest message: only then does something new scroll the chat down to it.
+    @State private var atBottom = true
     /// The send button's circle grows with the text size, so its arrow always fits inside it.
     @ScaledMetric(relativeTo: .subheadline) private var sendSize: CGFloat = 32
     @Query(AskView.latest) private var latest: [Conversation]
@@ -39,24 +41,6 @@ struct AskView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 4) {
-                        if let problem = model.problem {
-                            let settings = Self.needsSettings(problem)
-                            // Starting again can't help when it's a setting that's stopping it.
-                            Button {
-                                if settings, let url = URL(string: UIApplication.openSettingsURLString) {
-                                    UIApplication.shared.open(url)
-                                } else {
-                                    model.setListening(true)
-                                }
-                            } label: {
-                                Label(problem, systemImage: "exclamationmark.triangle.fill")
-                                    .multilineTextAlignment(.leading)
-                            }
-                            .buttonStyle(.plain)
-                            .font(.footnote).foregroundStyle(.secondary)
-                            .padding(.bottom, 8)
-                            .accessibilityHint(settings ? "Opens Settings" : "Starts listening again")
-                        }
                         if model.messages.isEmpty { welcome }
                         ForEach(Array(model.messages.enumerated()), id: \.element.id) { i, m in
                             let previous: ChatMessage? = i > 0 ? model.messages[i - 1] : nil
@@ -98,20 +82,43 @@ struct AskView: View {
                 .defaultScrollAnchor(.bottom, for: .initialOffset)
                 .defaultScrollAnchor(.bottom, for: .sizeChanges)
                 .scrollDismissesKeyboard(.interactively)
-                .onChange(of: model.messages.count) { withAnimation { proxy.scrollTo("bottom") } }
-                .onChange(of: (model.streaming?.count ?? 0) / 60) { proxy.scrollTo("bottom") }
+                .onScrollGeometryChange(for: Bool.self) { g in
+                    g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 80
+                } action: { _, near in
+                    atBottom = near
+                }
+                // Only for something new, and only if you were at the latest or just asked: deleting
+                // an old message, or reading back while an answer comes in, leaves you where you are.
+                .onChange(of: model.messages) { old, new in
+                    guard new.count > old.count, let last = new.last else { return }
+                    if atBottom || last.fromUser { withAnimation { proxy.scrollTo("bottom") } }
+                    // VoiceOver doesn't read a new bubble by itself, so the end of "Thinking…" would pass silently.
+                    // Only a new last one: a button's question and answer go in above one still being answered.
+                    if !last.fromUser, last.id != old.last?.id, UIAccessibility.isVoiceOverRunning {
+                        AccessibilityNotification.Announcement(last.text).post()
+                    }
+                }
+                .onChange(of: (model.streaming?.count ?? 0) / 60) { if atBottom { proxy.scrollTo("bottom") } }
             }
             .safeAreaInset(edge: .bottom) { inputBar }
+            // Above the chat, not in it: it opens at the latest message, so the first item is out of sight.
             .safeAreaInset(edge: .top, spacing: 0) {
-                if let trail {
-                    ThreadTrail(threads: trail.threads) { model.askAbout($0, in: trail.id) }
-                        // Kept modest at the largest text sizes, so the chat has the room.
-                        .dynamicTypeSize(...DynamicTypeSize.accessibility1)
-                        .background(.bar)
-                        .transition(.move(edge: .top).combined(with: .opacity))
+                VStack(spacing: 0) {
+                    if let problem = model.problem {
+                        problemBanner(problem)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+                    if let trail {
+                        ThreadTrail(threads: trail.threads) { model.askAbout($0, in: trail.id) }
+                            // Kept modest at the largest text sizes, so the chat has the room.
+                            .dynamicTypeSize(...DynamicTypeSize.accessibility1)
+                            .background(.bar)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
                 }
             }
             .animation(.snappy, value: trail?.threads.count)
+            .animation(.snappy, value: model.problem)
             .navigationTitle("Ask")
             // Inline, as a chat opens at its latest message: a large title would sit as an empty band.
             .navigationBarTitleDisplayMode(.inline)
@@ -132,6 +139,29 @@ struct AskView: View {
                 Text("Every question and answer in Ask goes. Your conversations stay. This can\u{2019}t be undone.")
             }
         }
+    }
+
+    /// Why listening stopped, and a tap to put it right.
+    private func problemBanner(_ problem: String) -> some View {
+        let settings = Self.needsSettings(problem)
+        // Starting again can't help when it's a setting that's stopping it.
+        return Button {
+            if settings, let url = URL(string: UIApplication.openSettingsURLString) {
+                UIApplication.shared.open(url)
+            } else {
+                model.setListening(true)
+            }
+        } label: {
+            Label(problem, systemImage: "exclamationmark.triangle.fill")
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .font(.footnote).foregroundStyle(.secondary)
+        .padding(.horizontal, 16).padding(.vertical, 8)
+        .background(.bar)
+        .accessibilityHint(settings ? "Opens Settings" : "Starts listening again")
     }
 
     /// Microphone access or Live Activities turned off: only Settings can put it right.
@@ -194,7 +224,7 @@ struct AskView: View {
         .animation(.snappy, value: typing && input.isEmpty)
     }
 
-    private var canSend: Bool { !input.trimmingCharacters(in: .whitespaces).isEmpty && model.status == nil }
+    private var canSend: Bool { !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && model.status == nil }
 
     private var field: some View {
         HStack(alignment: .bottom, spacing: 6) {
