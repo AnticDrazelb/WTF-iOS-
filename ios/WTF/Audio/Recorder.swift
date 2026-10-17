@@ -254,7 +254,11 @@ final class Recorder: @unchecked Sendable {
 
     /// Bumped by each fresh resume, so only the newest one keeps trying.
     private var retries = 0
-    private static let delays: [Double] = [0.5, 1, 2, 4, 8, 16]
+    /// Well inside the half a minute iOS gives WTF to keep running (see setRetrying), with room
+    /// for each try's own second or two, so giving up and telling the user happen before then.
+    private static let delays: [Double] = [0.5, 1, 2, 4, 8]
+    /// The last try failed because a call or Siri has the microphone. Under [infoLock].
+    private var _stallBusy = false
 
     private func resume(why: String, attempt: Int, mine: Int) {
         guard running else { setRetrying(false); return }
@@ -266,6 +270,16 @@ final class Recorder: @unchecked Sendable {
         } catch {
             Log.error("Couldn't resume listening \(why)", error)
             guard running else { setRetrying(false); return }
+            infoLock.lock()
+            let newest = retries == mine
+            if newest { _stallBusy = Self.busy(error) }
+            infoLock.unlock()
+            // A newer resume took over while this try was under way, or iOS's time for keeping WTF
+            // running ran out (see backgroundTimeRanOut): this one stands down.
+            guard newest else { return }
+            // Nothing's recording meanwhile, whatever stalled it (a route change too, not only a
+            // call): shown as paused, and the user's told if it doesn't come back.
+            if attempt == 0 { onInterrupted?() }
             if attempt < Self.delays.count {
                 setRetrying(true)
                 // Not on [queue]: stop() waits on it while holding the session lock.
@@ -278,17 +292,18 @@ final class Recorder: @unchecked Sendable {
                     self.resume(why: why, attempt: attempt + 1, mine: mine)
                 }
             } else {
-                setRetrying(false)
-                // Still no microphone half a minute on, and not for a call: stopped, and the user's told.
+                // Still no microphone after every try, and not for a call: stopped, and the user's
+                // told, before WTF stops being kept running.
                 if !Self.busy(error) { giveUp() }
                 // A call or Siri still has it: stays paused until the interruption ends or WTF's opened.
+                setRetrying(false)
             }
         }
     }
 
     /// Between tries to resume, nothing records, so nothing keeps WTF running in the background:
     /// iOS could suspend it (the phone locked after a call, say) before the next try. So it's
-    /// kept running while it tries, for the half a minute that takes at most.
+    /// kept running while it tries, for the quarter of a minute or so that takes.
     private var _retrying = false
     private func setRetrying(_ on: Bool) {
         infoLock.lock()
@@ -302,6 +317,19 @@ final class Recorder: @unchecked Sendable {
             self.infoLock.lock(); let now = self._retrying; self.infoLock.unlock()
             KeptRunning.shared.hold(now)
         }
+    }
+
+    /// iOS's time for keeping WTF running ran out while it was still trying (each try can take
+    /// longer than planned). The tries stop, as WTF's about to be suspended; and unless a call
+    /// has the microphone, listening's stopped now so the user's told, rather than it still
+    /// looking like it's listening. On the main thread, before the background task ends.
+    func backgroundTimeRanOut() {
+        infoLock.lock()
+        _retrying = false
+        retries += 1 // the pending try stands down
+        let busy = _stallBusy
+        infoLock.unlock()
+        if stalled, !busy { giveUp() }
     }
 
     /// A call or Siri has the microphone.
@@ -519,7 +547,10 @@ private final class KeptRunning {
         if on, task == .invalid {
             task = UIApplication.shared.beginBackgroundTask(withName: "wtf.resume") {
                 // Out of time: let go, or iOS closes WTF.
-                MainActor.assumeIsolated { KeptRunning.shared.hold(false) }
+                MainActor.assumeIsolated {
+                    Recorder.shared.backgroundTimeRanOut()
+                    KeptRunning.shared.hold(false)
+                }
             }
         } else if !on, task != .invalid {
             UIApplication.shared.endBackgroundTask(task)

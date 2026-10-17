@@ -83,6 +83,15 @@ public enum ActionRules {
         // Answering or catching something, not buying it: "I'll get the door", "grab the post".
         "door", "phone", "post", "car", "bus", "train", "call",
     ]
+    /// Not bought, but not someone being collected either, so kept out of [isCollecting]: the AI's
+    /// "Drinks" from "pick up drinks" and "My prescription" from "grab my prescription" are still shopping.
+    static let notBought: Set<String> = [
+        // Not shopping either: "let's get the bill", "grab a seat", "I need some fresh air", "can I get a hug?".
+        "bill", "air", "taxi", "cab", "uber", "lift", "ride", "seat", "lunch", "dinner", "breakfast", "drink", "drinks", "bite",
+        "pace", "advice", "help", "hug", "space", "round",
+        // Someone's own things: "grab your coat".
+        "your", "my", "his", "our", "their", "yourself", "myself",
+    ]
     /// Collecting someone, not buying something: "pick up Ezra from school", "collect the kids from nursery".
     static let collecting = Rx(#"\b(?:pick|picking|collect|collecting|fetch|fetching)\b.{0,40}\bfrom (?:school|nursery|pre-?school|college|uni|university|work|the station|the airport|practice|training|football|swimming|club|cubs|scouts|brownies|ballet|the party|(?:his|her|their|your|my) (?:mum|mom|dad|nan|gran|grandma|grandad|friend)'?s?)\b"#)
 
@@ -93,7 +102,21 @@ public enum ActionRules {
     /// "I'll see you tomorrow", "I'm going to be sick", "I have to say…": talk, not something to do.
     static let chatter = Rx(
         #"^(see you|tell you|let you know|be (there|right|honest|back|fine|sick|ok|okay|late|with you)\b|say\b|bet\b|think\b|admit\b|"# +
-        #"have a (look|think)\b|take that as|get the door\b)"#)
+        #"have a (look|think)\b|take that as|get the door\b|"# +
+        // Leaving, or talk to whoever's there: "I have to go now", "I'll catch you later", "I'll come with you".
+        #"(go|head|come|get|set|leave|make a move)( (off|now|home|out|back|in|up|down|away|on|along|over|then|too|first|to bed|to sleep|with you))*$|"# +
+        #"(talk|speak|catch|chat) (to |with )?(you|ya)\b|show you\b|wait (for you|here|there|outside|and see)\b|"# +
+        // Ordering food: "I'll have the chicken".
+        #"have (the|a|an|some) [a-z]+( please)?$)"#)
+    /// Talk about what's already happened: "the meeting on Monday went well", "her birthday was on the 3rd".
+    static let pastTense = Rx(
+        #"\b(was|were|went|had|did|been|yesterday|ago|last (monday|tuesday|wednesday|thursday|friday|saturday|sunday|week|weekend|night|month|year))\b"#)
+    /// Still to come, or moved: "it was going to be Friday", "the meeting was moved to Thursday".
+    static let stillToCome = Rx(
+        #"\b(is|are|will|shall|gonna|going to|can|could|should|let['’]?s|(it|that|there|what|he|she|who)['’]s|book|booked|booking|"# +
+        #"move|moving|moved|change|changing|changed|reschedule|rescheduling|rescheduled|put back|brought forward|pushed back)\b|['’](ll|re)\b"#)
+    /// Whether [sentence] is only about the past, so not a plan for the calendar.
+    static func past(_ sentence: String) -> Bool { pastTense.test(sentence) && !stillToCome.test(sentence) }
     static let eventNoun = Rx(
         #"\b(?:([a-z]+'s) )?(appointment|dentist|dental|doctor|gp|vet|interview|meeting|party|birthday|wedding|anniversary|"# +
         #"dinner|lunch|drinks|deadline|flight|match|gig|check-up|checkup|game night|parents' evening|mot|service)\b"#)
@@ -232,7 +255,7 @@ public enum ActionRules {
                         // "pick up Ezra": a name with no "some" or "the" before it is someone.
                         if r == 1, isCollecting(m[1], in: [clause]) { continue }
                         for it in splitItems(m[1]) where it.count >= 2 && it.count <= 40 &&
-                            !it.split(separator: " ").contains(where: { notItems.contains($0.lowercased()) }) {
+                            !it.split(separator: " ").contains(where: { notItems.contains($0.lowercased()) || notBought.contains($0.lowercased()) }) {
                             out.append(ExtractedAction(type: .buy, title: capitalised(it), source: line))
                         }
                     }
@@ -240,7 +263,8 @@ public enum ActionRules {
             }
             if !youOnly || speaker(line) == "You", let m = todoRule.first(t) {
                 var task = m[1].trimmingCharacters(in: .whitespaces)
-                for p in ["also ", "just "] where task.hasPrefix(p) { task.removeFirst(p.count) }
+                // "I'll have to ring them" is "ring them"; "I'll have to think about it" is talk.
+                for p in ["also ", "just ", "have to "] where task.hasPrefix(p) { task.removeFirst(p.count) }
                 // "Tom, I'll send you that link" -> "send Tom that link"
                 if let v = Rx(#"^([A-Z][a-z]+),"#, caseSensitive: true).first(t) {
                     task = Rx(#"\byou\b"#, caseSensitive: true).replace(task, with: v[1])
@@ -258,6 +282,8 @@ public enum ActionRules {
                 let noun = eventNoun.first(sentence)
                 // "after dinner tonight" is when, not a dinner to go to.
                 if noun != nil, Rx(#"\b(after|before|during|over|with)\s+(dinner|lunch|tea|breakfast|drinks)\b"#).test(sentence) { continue }
+                // "The meeting on Monday went well": it's been, so it isn't one to add.
+                if past(sentence) { continue }
                 // The date that follows the thing first ("dentist? ... next Tuesday"), then anything before it
                 // ("do it tonight or you'll forget what about your dentist" must not be tonight).
                 var candidates: [String] = []
@@ -322,6 +348,11 @@ public enum ActionRules {
             guard let resolved = WhenParser.parse(whenText, reference: saidAt, calendar: calendar) else { continue }
             // Today with no time: it's happening, not something to put in the calendar.
             if happeningToday(resolved, conversationStart: saidAt, calendar: calendar) { continue }
+            // Only said about the past ("we had dinner at the Crown on Saturday"): it's been.
+            if checking, let source {
+                let about = Rx(#"(?<=[.?!])\s+"#).split(said(source)).filter { overlap(e.what + " " + whenText, $0) > 0 }
+                if !about.isEmpty, about.allSatisfy(past) { continue }
+            }
             // The day (or time) has to have been said about it, not assumed: in the line that
             // mentions it, or the one after.
             if checking {

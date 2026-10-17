@@ -112,14 +112,21 @@ final class UnderstandingTests: XCTestCase {
 
     func testAppointmentsAreCheckedAgainstTheCalendar() {
         var cal = Calendar(identifier: .gregorian); cal.timeZone = TimeZone(identifier: "Europe/London")!
+        cal.locale = Locale(identifier: "en_US") // a 12-hour clock
         func at(_ d: Int, _ h: Int, _ m: Int = 0) -> Date { cal.date(from: DateComponents(year: 2026, month: 10, day: d, hour: h, minute: m))! }
         let entries = [CalendarCheck.Entry(title: "Dentist", start: at(20, 15, 30), allDay: false),
                        CalendarCheck.Entry(title: "MOT - Wood Lane garage", start: at(16, 9), allDay: false)]
         XCTAssertEqual(CalendarCheck.check(title: "Dentist appointment", start: at(20, 15, 30), allDay: false, against: entries, calendar: cal), .alreadyThere)
         XCTAssertEqual(CalendarCheck.check(title: "Dentist", start: at(21, 15, 30), allDay: false, against: entries, calendar: cal),
-                       .differs("Your calendar has it on Tuesday 20 October at 3:30 pm"))
+                       .differs("Your calendar has it on Tuesday, October 20 at 3:30 pm"))
         XCTAssertEqual(CalendarCheck.check(title: "MOT", start: at(16, 14), allDay: false, against: entries, calendar: cal),
                        .differs("Your calendar has it at 9:00 am"))
+        // On a 24-hour clock, the times are as the person reads them.
+        var uk = cal; uk.locale = Locale(identifier: "en_GB")
+        XCTAssertEqual(CalendarCheck.check(title: "Dentist", start: at(21, 15, 30), allDay: false, against: entries, calendar: uk),
+                       .differs("Your calendar has it on Tuesday 20 October at 15:30"))
+        XCTAssertEqual(CalendarCheck.check(title: "MOT", start: at(16, 14), allDay: false, against: entries, calendar: uk),
+                       .differs("Your calendar has it at 09:00"))
         XCTAssertNil(CalendarCheck.check(title: "Vet appointment", start: at(20, 15, 30), allDay: false, against: entries, calendar: cal))
         // Sharing only "dinner", "call" or "meeting" isn't the same thing.
         let busy = [CalendarCheck.Entry(title: "Dinner with Sarah", start: at(16, 19), allDay: false),

@@ -32,6 +32,8 @@ struct WTFApp: App {
                 .onOpenURL { url in
                     if url.host == "ask" { model.askFromShortcut() }
                     if url.host == "listening" { model.openedFromPill() }
+                    // The card's answer is already Ask's last message: shown, not asked again.
+                    if url.host == "answer" { model.tab = 0 }
                 }
         }
         .onChange(of: phase) { _, now in
@@ -118,7 +120,10 @@ struct StopListeningSheet: View {
                 }
                 VStack(spacing: 4) {
                     Text(model.paused ? "Listening is paused" : "WTF is listening").font(.title2.bold())
-                    if let since = model.listeningSince {
+                    if model.paused {
+                        Text("Something else has the microphone. WTF carries on when it\u{2019}s free.")
+                            .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    } else if let since = model.listeningSince {
                         Text("Since \(since.formatted(date: .omitted, time: .shortened))")
                             .font(.subheadline).foregroundStyle(.secondary)
                     }
@@ -137,12 +142,17 @@ struct StopListeningSheet: View {
                             .background(Capsule().fill(Color.primary))
                     }
                     .buttonStyle(.plain)
+                    // A grey capsule, so it reads as a button and not a caption under Stop.
                     if model.hasHeard {
-                        Button("What Was I Saying?") {
+                        Button {
                             dismiss()
                             model.askFromShortcut()
+                        } label: {
+                            Text("What Was I Saying?").frame(maxWidth: .infinity)
                         }
-                        .frame(maxWidth: .infinity)
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.capsule)
+                        .controlSize(.large)
                     }
                     Button("Keep Listening") { dismiss() }
                         .foregroundStyle(.secondary)
@@ -168,10 +178,10 @@ struct ListeningButton: View {
 
     var body: some View {
         // While a start's under way (the first can be a long download), a tap gives up on it.
-        // Paused (a call or Siri took the microphone): a tap tries to carry on, and says why if
-        // it can't, as Ask's banner does.
+        // Paused (a call or Siri took the microphone): WTF carries on by itself once it's free, so
+        // a tap opens the stop sheet, which says so and can stop it.
         Button {
-            if model.recording && model.paused { model.setListening(true) }
+            if model.recording && model.paused { model.stopSheet = true }
             else { model.setListening(model.isStarting ? false : !model.recording) }
         } label: {
             HStack(spacing: 6) {
@@ -189,7 +199,7 @@ struct ListeningButton: View {
             .foregroundStyle(.primary)
             .padding(.horizontal, 4)
         }
-        .accessibilityHint(model.recording ? (model.paused ? "Tries to carry on listening" : "Stops listening") : model.isStarting ? "Cancels starting" : "Starts listening")
+        .accessibilityHint(model.recording ? (model.paused ? "Shows options to stop listening" : "Stops listening") : model.isStarting ? "Cancels starting" : "Starts listening")
         .sensoryFeedback(.impact(weight: .medium), trigger: model.recording)
     }
 

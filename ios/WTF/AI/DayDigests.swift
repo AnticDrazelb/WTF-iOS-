@@ -39,7 +39,9 @@ final class DayDigests {
 
     /// The day's recap, written now if there isn't one for these notes yet, one day at a time.
     /// Nil without Apple Intelligence, or if it couldn't be written.
-    func recap(for day: Date, notes: [DayNote]) async -> String? {
+    /// [keep]: false for one written partly from words not yet summarised (Ask's), which isn't kept
+    /// in place of the timeline's.
+    func recap(for day: Date, notes: [DayNote], keep: Bool = true) async -> String? {
         let key = Self.key(day), from = Self.fingerprint(notes)
         if let k = kept[key], k.from == from { return k.text }
         guard !notes.isEmpty, Brain.notReadyReason == nil else { return nil }
@@ -56,8 +58,10 @@ final class DayDigests {
         // With a deadline: a stalled model would otherwise hold busy, and every later recap, for ever.
         guard let text = await withDeadline(40, { await Log.attempt("Couldn't write the day's recap", { try await Brain.day(prompt) }) }),
               !text.isEmpty, generation == started else { return nil }
-        kept[key] = Kept(from: from, text: text)
-        save()
+        if keep {
+            kept[key] = Kept(from: from, text: text)
+            save()
+        }
         return text
     }
 

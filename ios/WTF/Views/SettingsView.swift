@@ -66,7 +66,8 @@ struct SettingsView: View {
                 if activitiesOff || notificationsOff {
                     Section {
                         if activitiesOff {
-                            warning("Live Activities are off for WTF, so there\u{2019}s no listening pill or Lock Screen card, and \(ActionButtonSetupView.hasActionButton ? "the Action button and " : "")Control Center can\u{2019}t start listening.")
+                            // The Action button still starts it, by bringing WTF forward first; Control Center can't.
+                            warning("Live Activities are off for WTF, so there\u{2019}s no listening pill or Lock Screen card, and Control Center can\u{2019}t start listening\(ActionButtonSetupView.hasActionButton ? "; the Action button opens WTF to start" : "").")
                         }
                         if notificationsOff {
                             warning("Notifications are off for WTF, so you\u{2019}re not told when it stops listening, and answers from Control Center or the Lock Screen don\u{2019}t show while WTF is closed.")
@@ -133,7 +134,7 @@ struct SettingsView: View {
                         Text("Transcription")
                     } footer: {
                         if !Parakeet.suitable {
-                            Text("Better Accuracy only works when your iPhone\u{2019}s language is English. Turn it off to delete the 440 MB model.")
+                            Text("Better Accuracy only works when WTF transcribes in English. Turn it off to delete the 440 MB model.")
                         } else {
                             Text("When a conversation ends, WTF transcribes it again with NVIDIA\u{2019}s Parakeet speech model before writing it up: fewer misheard words, most of all with background noise. English only. A one-off download of about 440 MB, best on Wi-Fi; it runs on this iPhone, and turning it off deletes it. Live transcription still uses Apple\u{2019}s.")
                         }
@@ -212,11 +213,18 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    if ActionButtonSetupView.hasActionButton {
-                        NavigationLink("Set Up Action Button", value: "button")
-                    }
                     NavigationLink(value: "voice") {
                         LabeledContent("Read-Aloud Voice", value: chosenVoice.isEmpty ? "Automatic" : ReadAloud.voice?.name ?? "Automatic")
+                    }
+                } header: {
+                    Text("Answers")
+                } footer: {
+                    Text("The voice that reads answers aloud.")
+                }
+
+                Section {
+                    if ActionButtonSetupView.hasActionButton {
+                        NavigationLink("Set Up Action Button", value: "button")
                     }
                     NavigationLink("More Ways to Use WTF", value: "ways")
                 } header: {
@@ -266,12 +274,17 @@ struct SettingsView: View {
                 // Left behind (switched off as the app was stopped): there's no switch to delete it with.
                 if !betterOn && betterDownloaded && model.betterProgress == nil {
                     await Parakeet.shared.remove()
-                    betterDownloaded = Parakeet.downloaded
                 }
+                // Restored from a backup, the flag can say it's downloaded when the model isn't here.
+                betterDownloaded = Parakeet.downloaded
                 await checkPermissions()
+                followVoicesDownload()
             }
             // A start downloads the speech model too: the row catches up when it's done.
-            .onChange(of: model.isStarting) { Task { speechReady = await SpeechEngine.shared.isReady() } }
+            .onChange(of: model.isStarting) {
+                Task { speechReady = await SpeechEngine.shared.isReady() }
+                followVoicesDownload()
+            }
             // Back from iOS Settings, maybe with something turned on.
             .onChange(of: scenePhase) { if scenePhase == .active { Task { await checkPermissions() } } }
             // Back from Words You've Corrected.
@@ -424,6 +437,13 @@ struct SettingsView: View {
         return "The download didn\u{2019}t finish. Check Wi-Fi and free space, then try again."
     }
 
+    /// Listening downloads the voice models by itself: joined here (prepare waits on the one under
+    /// way), so the row shows it rather than offering Download, and says if it fails.
+    private func followVoicesDownload() {
+        guard voicesOn, !voicesDownloaded, !voicesLoading, model.recording, !model.isStarting else { return }
+        downloadVoices()
+    }
+
     private func downloadVoices() {
         voicesLoading = true
         voicesFailed = false
@@ -542,6 +562,8 @@ struct AcknowledgementsView: View {
         let use: String
         let licence: String
         let link: URL
+        /// A licence whose own words must go with the app, shown in full.
+        var notice: String? = nil
         var id: String { name }
     }
 
@@ -550,11 +572,31 @@ struct AcknowledgementsView: View {
                licence: "Apache License 2.0", link: URL(string: "https://github.com/FluidInference/FluidAudio")!),
         Credit(name: "NVIDIA Parakeet TDT 0.6B v2", use: "The Better Accuracy speech model, converted for Core ML by FluidInference.",
                licence: "CC BY 4.0", link: URL(string: "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2")!),
-        Credit(name: "pyannote segmentation", use: "Finds where each voice speaks, for Tell Voices Apart.",
-               licence: "MIT License", link: URL(string: "https://huggingface.co/pyannote/segmentation-3.0")!),
+        Credit(name: "pyannote speaker-diarization-community-1", use: "Finds where each voice speaks, for Tell Voices Apart, converted for Core ML by FluidInference.",
+               licence: "CC BY 4.0", link: URL(string: "https://huggingface.co/pyannote/speaker-diarization-community-1")!),
         Credit(name: "WeSpeaker ResNet34", use: "Tells one voice from another, for Tell Voices Apart.",
                licence: "CC BY 4.0", link: URL(string: "https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM")!),
+        Credit(name: "VBx", use: "Sorts what was said into voices, for Tell Voices Apart. \u{00A9} Brno University of Technology.",
+               licence: "Apache License 2.0", link: URL(string: "https://github.com/BUTSpeechFIT/VBx")!),
+        Credit(name: "fastcluster", use: "Groups similar voices, for Tell Voices Apart.",
+               licence: "BSD 2-Clause", link: URL(string: "https://github.com/fastcluster/fastcluster")!,
+               notice: fastclusterNotice),
     ]
+
+    /// Its licence asks for the notice to be reproduced with the app, so it's here word for word.
+    private static let fastclusterNotice = """
+        Copyright:
+          * Until package version 1.1.23: \u{00A9} 2011 Daniel M\u{00FC}llner <https://danifold.net>
+          * All changes from version 1.1.24 on: \u{00A9} Google Inc. <https://www.google.com>
+        All rights reserved.
+
+        Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+
+          * Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+          * Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+
+        THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+        """
 
     var body: some View {
         List {
@@ -567,12 +609,15 @@ struct AcknowledgementsView: View {
                     .padding(.vertical, 2)
                     LabeledContent("Licence", value: c.licence)
                     Link("View Source and Licence", destination: c.link)
+                    if let notice = c.notice {
+                        Text(notice).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+                    }
                 }
             }
             Section {
                 Link("Apache License 2.0", destination: URL(string: "https://www.apache.org/licenses/LICENSE-2.0")!)
                 Link("CC BY 4.0", destination: URL(string: "https://creativecommons.org/licenses/by/4.0/")!)
-                Link("MIT License", destination: URL(string: "https://opensource.org/license/mit")!)
+                Link("BSD 2-Clause", destination: URL(string: "https://opensource.org/license/bsd-2-clause")!)
             } header: {
                 Text("Licences")
             } footer: {

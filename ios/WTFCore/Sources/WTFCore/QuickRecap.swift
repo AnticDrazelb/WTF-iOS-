@@ -65,12 +65,12 @@ public enum QuickRecap {
         } else if main.who == Labels.me {
             out = "You were saying, \(said): \(quote)"
         } else {
-            let who = name(main.who)
+            let who = spokenName(main.who)
             out = "\(who.prefix(1).uppercased() + who.dropFirst()) was saying, \(said): \(quote)"
         }
         if main.cutOff { out += "\u{2026}" }
         if !anonymous, i + 1 < turns.count {
-            let who = turns[i + 1].who == Labels.me ? "you" : name(turns[i + 1].who)
+            let who = turns[i + 1].who == Labels.me ? "you" : spokenName(turns[i + 1].who, other: main.who != Labels.me)
             out += main.cutOff ? " Then \(who) cut in." : " Then \(who) said something."
         }
         return out
@@ -110,6 +110,12 @@ public enum QuickRecap {
 
     /// A line's speaker as said aloud: "Speech" (voices not told apart then) is just "someone".
     static func name(_ who: String) -> String { who == Labels.anonymous ? "someone" : who }
+
+    /// Read aloud, an unnamed voice isn't "Speaker 2": it's "someone" ([other]: "someone else").
+    static func spokenName(_ who: String, other: Bool = false) -> String {
+        guard who.range(of: #"^Speaker \d+$"#, options: .regularExpression) != nil else { return name(who) }
+        return other ? "someone else" : "someone"
+    }
 
     /// "just now", "40 seconds ago", "5 minutes ago", or "at 11:40".
     static func ago(_ at: Date, now: Date, calendar: Calendar) -> String {

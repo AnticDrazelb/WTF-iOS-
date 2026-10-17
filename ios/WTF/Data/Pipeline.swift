@@ -42,11 +42,20 @@ actor Pipeline {
     /// Bumped by Delete Everything and cutOff: work that was waiting on something checks it hasn't happened meanwhile.
     private var wiped = 0
     /// When everything was last deleted: a recording that started before then, finished after, goes too.
-    private var wipedAt = Date.distantPast
+    /// Kept across launches: one WTF was ended part-way through is taken in when it next runs
+    /// (sweepAudio), and what was deleted mustn't come back then.
+    private var wipedAt: Date {
+        get { UserDefaults.standard.object(forKey: "wipedAt") as? Date ?? .distantPast }
+        set { UserDefaults.standard.set(newValue, forKey: "wipedAt") }
+    }
+    /// Conversations deleted in the app: AI work already under way for one finds it gone, rather
+    /// than suggesting list items from it as it goes.
+    private var forgotten = Set<UUID>()
 
     /// A conversation, fetched afresh by its id: one held across a wait may have been deleted meanwhile.
     private func conversation(_ id: UUID) -> Conversation? {
-        (try? modelContext.fetch(FetchDescriptor<Conversation>(predicate: #Predicate { $0.id == id })))?.first
+        guard !forgotten.contains(id) else { return nil }
+        return (try? modelContext.fetch(FetchDescriptor<Conversation>(predicate: #Predicate { $0.id == id })))?.first
     }
 
     func addChunk(url: URL, start: Date, end: Date) {
@@ -77,10 +86,21 @@ actor Pipeline {
         return await job.value
     }
 
+    /// When each recording that failed was last tried (by its file), so it's tried again after a
+    /// while, longer each time, not on every recording ahead of what's just been said.
+    private var lastTried: [String: Date] = [:]
+
     private func transcribePending() async -> Bool {
-        let pending = (try? modelContext.fetch(FetchDescriptor<Chunk>(
+        let now = Date()
+        let all = (try? modelContext.fetch(FetchDescriptor<Chunk>(
             predicate: #Predicate { $0.status == "pending" }, sortBy: [SortDescriptor(\.start)]))) ?? []
-        guard !pending.isEmpty, await SpeechEngine.shared.isReady() else { return true }
+        // New ones first; one that failed waits its turn after them.
+        let pending = all.filter { $0.attempts == 0 } + all.filter { chunk in
+            guard chunk.attempts > 0 else { return false }
+            guard let path = chunk.path, let tried = lastTried[path] else { return true }
+            return now > tried.addingTimeInterval(60 * pow(2, Double(chunk.attempts)))
+        }
+        guard !pending.isEmpty, await SpeechEngine.shared.isReady() else { return pending.count == all.count }
         let generation = wiped
         defer { Task { @MainActor in AppModel.shared.transcribing = nil } }
         var ok = true
@@ -167,6 +187,7 @@ actor Pipeline {
                 if gone(chunk) { continue }
                 Log.error("Couldn't transcribe the recording from \(chunk.start.formatted(date: .omitted, time: .standard)) (try \(chunk.attempts + 1) of 5)", error)
                 chunk.attempts += 1
+                lastTried[path] = Date()
                 if chunk.attempts >= 5 {
                     chunk.status = "failed"
                     chunk.path = nil
@@ -176,7 +197,7 @@ actor Pipeline {
             }
             try? modelContext.save()
         }
-        return ok
+        return ok && pending.count == all.count
     }
 
     /// Catch up and follow the topic, then (in the background, without waiting) summarise
@@ -200,17 +221,21 @@ actor Pipeline {
         let quietBefore = Date().addingTimeInterval(-Double(gapMinutes) * 60)
         // One whose summary just failed is tried again in a while, not on the very next recording.
         let retryBefore = Date().addingTimeInterval(-600)
-        var over = ((try? modelContext.fetch(FetchDescriptor<Conversation>(
-            predicate: #Predicate { $0.summary == nil }))) ?? []).filter {
-            ($0.closed || $0.end < quietBefore) && ($0.summaryTriedAt ?? .distantPast) < retryBefore
-        }
-        // Without Apple Intelligence no summary can be written: only ones still to close, or with
-        // audio to hear again, are worth a look, not every one kept, on every recording.
-        if Brain.notReadyReason != nil {
+        // Only the ones wanted are fetched, not every one kept: this is done on every recording.
+        var over: [Conversation]
+        if Brain.notReadyReason == nil {
+            over = (try? modelContext.fetch(FetchDescriptor<Conversation>(
+                predicate: #Predicate { $0.summary == nil && ($0.closed || $0.end < quietBefore) }))) ?? []
+        } else {
+            // Without Apple Intelligence no summary can be written: only ones still to close, or
+            // with audio to hear again, are worth a look.
+            over = (try? modelContext.fetch(FetchDescriptor<Conversation>(
+                predicate: #Predicate { $0.summary == nil && !$0.closed && $0.end < quietBefore }))) ?? []
             let withAudio = Set(((try? modelContext.fetch(FetchDescriptor<Chunk>(
                 predicate: #Predicate { $0.status == "done" && $0.path != nil }))) ?? []).compactMap(\.conversationID))
-            over = over.filter { !$0.closed || withAudio.contains($0.id) }
+            over += withAudio.compactMap { conversation($0) }.filter { $0.summary == nil && $0.closed }
         }
+        over = over.filter { ($0.summaryTriedAt ?? .distantPast) < retryBefore }
         let waiting = over.map(\.id)
         for id in waiting {
             guard wiped == generation else { return }
@@ -218,11 +243,14 @@ actor Pipeline {
         }
         guard wiped == generation else { return }
         // Summarised, but WTF was closed before its facts and list items were looked for.
-        let unfinished = ((try? modelContext.fetch(FetchDescriptor<Conversation>(
-            predicate: #Predicate { $0.summary != nil }))) ?? []).filter { $0.extracted == false }.map(\.id)
-        for id in unfinished where Brain.notReadyReason == nil {
-            guard wiped == generation else { return }
-            await extract(id)
+        if Brain.notReadyReason == nil {
+            let no: Bool? = false
+            let unfinished = ((try? modelContext.fetch(FetchDescriptor<Conversation>(
+                predicate: #Predicate { $0.summary != nil && $0.extracted == no }))) ?? []).map(\.id)
+            for id in unfinished {
+                guard wiped == generation else { return }
+                await extract(id)
+            }
         }
         guard wiped == generation else { return }
         // Old recordings' records go here: once their audio's gone a day after, or at the latest
@@ -241,6 +269,9 @@ actor Pipeline {
     /// day, a whole-conversation file left by a second hearing that was cut short, and
     /// recordings nothing refers to any more.
     private func sweepAudio() {
+        // The store didn't open (AppModel uses a stand-in): the recordings on disk belong to the
+        // real one, left alone for next time, not swept as if nothing referred to them.
+        guard !modelContainer.configurations.contains(where: { $0.isStoredInMemoryOnly }) else { return }
         let fm = FileManager.default
         let dayAgo = Date().addingTimeInterval(-86_400)
         for chunk in (try? modelContext.fetch(FetchDescriptor<Chunk>(predicate: #Predicate { $0.status == "done" && $0.path != nil && $0.end < dayAgo }))) ?? [] {
@@ -378,7 +409,10 @@ actor Pipeline {
     /// A conversation about to be deleted (by the app, where the screens' copies are): nothing
     /// more is done with it, and its audio goes.
     func forget(_ id: UUID) {
+        forgotten.insert(id)
         unremembered[id] = nil
+        // What it was heard to say isn't left on the Lock Screen.
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [Self.heardNotice(id)])
         toFollow.removeAll { $0.id == id }
         let optional: UUID? = id
         for chunk in (try? modelContext.fetch(FetchDescriptor<Chunk>(predicate: #Predicate { $0.conversationID == optional }))) ?? [] {
@@ -451,6 +485,7 @@ actor Pipeline {
         toFollow = []
         LiveTranscriber.shared.forget()
         unremembered = [:]
+        forgotten = []
         try? modelContext.delete(model: Fact.self)
         Learned.forget()
         DeclinedNames.forget()
@@ -534,7 +569,8 @@ actor Pipeline {
     /// of it at once (steadier than recording by recording, where a short snippet can be put
     /// down to the wrong person), and the words transcribed with all the context around them.
     /// With Better Accuracy on, the words come from Parakeet (Apple's if that fails), and even a
-    /// conversation of one recording is heard again for them.
+    /// conversation of one recording is heard again for them, if it's long enough to be worth
+    /// loading the model (its voices were told apart just now, so they stay as they are).
     /// It replaces the first transcript only if it's sound and nothing changed it meanwhile (you
     /// naming a voice or fixing a word), then misheard words are fixed again. The audio is
     /// deleted afterwards either way.
@@ -546,8 +582,9 @@ actor Pipeline {
                                                                      sortBy: [SortDescriptor(\.start)]))) ?? []
         let recordings = chunks.compactMap { chunk in chunk.path.map { (url: URL(fileURLWithPath: $0), recorded: chunk.start) } }
         let length = chunks.reduce(0.0) { $0 + $1.end.timeIntervalSince($1.start) }
-        let better = Parakeet.inUse, voicesOn = Self.voicesAgain
-        guard chunks.count >= (better ? 1 : 2), recordings.count == chunks.count, length <= Self.hearAgainLimit,
+        let better = Parakeet.inUse, single = chunks.count == 1
+        let voicesOn = Self.voicesAgain && !single
+        guard chunks.count >= (better ? 1 : 2), !single || length >= 20, recordings.count == chunks.count, length <= Self.hearAgainLimit,
               recordings.allSatisfy({ FileManager.default.fileExists(atPath: $0.url.path) }) else { return }
         let before = c.transcript
         let started = Date()
@@ -572,8 +609,10 @@ actor Pipeline {
             }
         }
         let split = await heardVoices
+        // Parakeet isn't told the names to expect, as Apple's recogniser is (see missedNames).
+        let expected = better ? await SpeechEngine.shared.expectedWords() : []
         // Without the voices, Better Accuracy's words are still worth having (see keptVoices).
-        guard let words, !words.isEmpty, split != nil || !voicesOn || better else {
+        guard var words, !words.isEmpty, split != nil || !voicesOn || better else {
             Log.info("Hearing the conversation again didn't finish, so it's kept as it was")
             return
         }
@@ -581,6 +620,7 @@ actor Pipeline {
             Log.info("The conversation changed while it was being heard again, so it's kept as it is")
             return
         }
+        if better { words = Self.withLearnedNames(words) }
         // Without the voice models, every line's just "Speech", as it was.
         var heard: [Voiceprint] = []
         let labels = split.map { VoiceMatcher.label($0.voices, heard: &heard, known: knownVoices()) } ?? [:]
@@ -588,16 +628,25 @@ actor Pipeline {
         // A name given to a voice as it went (you named it, or it was matched then) that this
         // hearing doesn't find, or no voices heard this time: the voices stay as they were.
         let named = Set(Labels.speakers(in: before)).filter { $0 != Labels.anonymous && Labels.number($0) == nil }
-        let keptVoices = (voicesOn && split == nil) || !named.isSubset(of: Set(labels.values))
+        let keptVoices = single || (voicesOn && split == nil) || !named.isSubset(of: Set(labels.values))
         if keptVoices { turns = Self.turns(of: before, from: now.start, in: joined) }
         let fallback = keptVoices ? turns.first?.speaker ?? Labels.anonymous
             : split == nil ? Labels.anonymous : turns.first?.speaker ?? Labels.numbered(1)
-        let said = SpeakerAlign.assign(words, turns: turns, fallback: fallback)
-        let utterances = said.compactMap { s -> Utterance? in
-            let text = TranscriptFormat.clean(s.text)
-            return text.isEmpty ? nil : Utterance(start: joined.time(at: s.start), speaker: s.speaker, text: text)
+        // A line every half a minute or so, as when it was heard as it went: one voice talking
+        // for minutes (or voices not told apart) would otherwise be one line, with one time, for the lot.
+        var pieces: [String] = []
+        var last = fallback
+        for stretch in Self.stretches(of: words) {
+            let said = SpeakerAlign.assign(stretch, turns: turns, fallback: last)
+            last = said.last?.speaker ?? last
+            let utterances = said.compactMap { s -> Utterance? in
+                let text = TranscriptFormat.clean(s.text)
+                return text.isEmpty ? nil : Utterance(start: joined.time(at: s.start), speaker: s.speaker, text: text)
+            }
+            let piece = TranscriptFormat.lines(utterances)
+            if !piece.isEmpty { pieces.append(piece) }
         }
-        let transcript = TranscriptFormat.lines(utterances)
+        let transcript = pieces.joined(separator: "\n")
         guard JoinedAudio.accept(old: before, new: transcript) else {
             Log.info("Heard the conversation again, but the result didn't look right, so it's kept as it was")
             return
@@ -609,7 +658,11 @@ actor Pipeline {
         Log.info("Heard a \(Int(joined.length / 60)) min conversation again as a whole\(better ? " (Better Accuracy)" : ""): \(keptVoices ? "voices kept as they were, " : "")\(Set(turns.map(\.speaker)).count) voices (was \(voicesBefore)), \(String(format: "%.0f", Date().timeIntervalSince(started))) s")
         // Misheard words fixed again: the stretches with words the recogniser doubted.
         guard Brain.notReadyReason == nil else { return }
-        let doubts = Doubts.of(words, limit: 60), protected = Doubts.protected(words)
+        var doubts = Doubts.of(words, limit: 60)
+        let missed = better ? Self.missedNames(words, before: before, from: now.start, in: joined, expected: expected) : []
+        let alreadyDoubted = Set(doubts.map(\.word))
+        doubts += missed.filter { !alreadyDoubted.contains($0.word) }
+        let protected = Doubts.protected(words).subtracting(missed.map(\.word))
         let doubted = Set(doubts.map(\.word))
         let lines = transcript.split(separator: "\n").map(String.init)
         for start in stride(from: 0, to: lines.count, by: 12) {
@@ -624,18 +677,95 @@ actor Pipeline {
     /// The voices as they were heard as it went: a turn for each line of [transcript], until the
     /// next line, in seconds into the joined audio.
     private static func turns(of transcript: String, from start: Date, in joined: JoinedAudio) -> [SpeakerAlign.Turn] {
+        spans(of: transcript, from: start, in: joined).map { SpeakerAlign.Turn(start: $0.start, end: $0.end, speaker: $0.speaker) }
+    }
+
+    /// Each line of [transcript], who said it and what, from when it was said until the next
+    /// line, in seconds into the joined audio.
+    private static func spans(of transcript: String, from start: Date, in joined: JoinedAudio) -> [(start: Double, end: Double, speaker: String, text: String)] {
         let lines = transcript.split(separator: "\n")
         let times = TranscriptFormat.times(of: lines, from: start)
-        var timed: [(at: Double, speaker: String)] = []
+        var timed: [(at: Double, speaker: String, text: String)] = []
         for (i, line) in lines.enumerated() {
             guard let t = times[i], let g = TranscriptFormat.turn.whole(String(line)) else { continue }
             // Line times are to the second: a line just after a recording began counts as in it.
             guard let piece = joined.pieces.last(where: { $0.recorded <= t.addingTimeInterval(1) }) ?? joined.pieces.first else { continue }
-            timed.append((piece.at + min(max(0, t.timeIntervalSince(piece.recorded)), piece.length), g[1]))
+            timed.append((piece.at + min(max(0, t.timeIntervalSince(piece.recorded)), piece.length), g[1], g[2]))
         }
         return timed.enumerated().map { i, line in
-            SpeakerAlign.Turn(start: line.at, end: i + 1 < timed.count ? timed[i + 1].at : joined.length, speaker: line.speaker)
+            (start: line.at, end: i + 1 < timed.count ? timed[i + 1].at : joined.length, speaker: line.speaker, text: line.text)
         }
+    }
+
+    /// About this long, a line of a conversation heard again ends at the end of a sentence; at
+    /// twice this, wherever it's got to.
+    static let lineSeconds = 25.0
+
+    /// [words] in stretches of about [lineSeconds], each to be a line (or a line per voice) of its own.
+    private static func stretches(of words: [SpeakerAlign.Word]) -> [[SpeakerAlign.Word]] {
+        var out: [[SpeakerAlign.Word]] = []
+        var current: [SpeakerAlign.Word] = []
+        for w in words {
+            if let first = current.first, let previous = current.last {
+                let span = w.start - first.start
+                let sentenceEnded = previous.text.trimmingCharacters(in: .whitespaces).last.map { ".?!\u{2026}".contains($0) } ?? false
+                if span > 2 * lineSeconds || (span > lineSeconds && sentenceEnded) {
+                    out.append(current)
+                    current = []
+                }
+            }
+            current.append(w)
+        }
+        if !current.isEmpty { out.append(current) }
+        return out
+    }
+
+    /// Names you've corrected ("Shona" → "Siobhan") put right in Parakeet's words: unlike Apple's
+    /// recogniser, it isn't told them. Only names, one word for one: a fix of an ordinary word
+    /// may not be right everywhere it's heard. And only where Parakeet took it for a name too
+    /// (a capital, not just a sentence's first word): a name once misheard as "and" or "will"
+    /// isn't put in for every "and" or "will".
+    private static func withLearnedNames(_ words: [SpeakerAlign.Word]) -> [SpeakerAlign.Word] {
+        var names: [String: String] = [:]
+        // Most used first, so that one wins.
+        for fix in Learned.fixes where !fix.heard.contains(" ") && !fix.meant.contains(" ") && fix.meant.first?.isUppercase == true {
+            if names[fix.heard] == nil { names[fix.heard] = fix.meant }
+        }
+        guard !names.isEmpty else { return words }
+        return words.indices.map { i in
+            let w = words[i]
+            guard let meant = names[Doubts.normal(w.text)], w.text.first?.isUppercase == true, i > 0,
+                  let end = words[i - 1].text.last, !".?!\u{2026}".contains(end) else { return w }
+            var fixed = w
+            // Punctuation after it is kept ("Shona," → "Siobhan,").
+            fixed.text = meant + String(w.text.reversed().prefix(while: { $0.isPunctuation }).reversed())
+            return fixed
+        }
+    }
+
+    /// Names WTF was told to expect (people, contacts, what you've corrected) that the first
+    /// hearing got and Parakeet didn't: what it heard around that line instead is pointed out to
+    /// the AI, with the name as the likely reading, rather than kept because it was sure of it.
+    private static func missedNames(_ words: [SpeakerAlign.Word], before: String, from start: Date, in joined: JoinedAudio,
+                                    expected: [String]) -> [Doubt] {
+        func tokens(_ text: String) -> [String] { text.split(whereSeparator: \.isWhitespace).map { Doubts.normal(String($0)) } }
+        let expect = Set(expected.flatMap(tokens).filter { $0.count >= 3 })
+        guard !expect.isEmpty else { return [] }
+        let heardNow = Set(words.map { Doubts.normal($0.text) })
+        let lines = spans(of: before, from: start, in: joined)
+        let heardThen = Set(lines.flatMap { tokens($0.text) })
+        var out: [Doubt] = []
+        var seen = Set<String>()
+        for line in lines {
+            let lost = Set(tokens(line.text)).filter { expect.contains($0) && !heardNow.contains($0) }
+            guard !lost.isEmpty else { continue }
+            for w in words where w.end > line.start - 1 && w.start < line.end + 1 {
+                let n = Doubts.normal(w.text)
+                guard !n.isEmpty, !heardThen.contains(n), seen.insert(n).inserted else { continue }
+                out.append(Doubt(word: n, confidence: w.confidence, alternatives: Array(lost.sorted().prefix(3))))
+            }
+        }
+        return Array(out.prefix(20))
     }
 
     /// Who spoke when in the whole conversation, if the voice models are on.
@@ -1042,7 +1172,7 @@ actor Pipeline {
 
     /// Suggests what's new: not on the list already, and not already suggested from this conversation.
     private func suggest(for c: Conversation, found: [ExtractedAction]) async {
-        guard !found.isEmpty else { return }
+        guard !found.isEmpty, !forgotten.contains(c.id) else { return }
         let cid: UUID? = c.id
         let open = (try? modelContext.fetch(FetchDescriptor<ActionItem>(predicate: #Predicate { $0.status == "suggested" || $0.status == "accepted" }))) ?? []
         let mine = (try? modelContext.fetch(FetchDescriptor<ActionItem>(predicate: #Predicate { $0.conversationID == cid }))) ?? []
@@ -1110,8 +1240,12 @@ actor Pipeline {
         let content = UNMutableNotificationContent()
         content.title = "WTF heard \(fresh.count) thing\(fresh.count == 1 ? "" : "s") to act on"
         content.body = fresh.prefix(3).map(\.title).joined(separator: ", ")
-        try? await UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+        // One per conversation (a later one replaces it), so it goes when the conversation does (forget).
+        try? await UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: Self.heardNotice(c.id), content: content, trigger: nil))
     }
+
+    /// The "WTF heard…" notification for a conversation.
+    static func heardNotice(_ id: UUID) -> String { "wtf.heard.\(id.uuidString)" }
 }
 
 extension Pipeline {

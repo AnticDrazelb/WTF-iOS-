@@ -14,7 +14,7 @@ struct AskWTFIntent: AudioPlaybackIntent {
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let answer = await AppModel.shared.answerFromShortcut()
-        return .result(dialog: answerDialog(answer))
+        return .result(dialog: await answerDialog(answer))
     }
 }
 
@@ -36,13 +36,14 @@ struct WhatWasISayingIntent: AudioPlaybackIntent {
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let answer = await AppModel.shared.answerFromShortcut()
-        return .result(dialog: answerDialog(answer))
+        return .result(dialog: await answerDialog(answer))
     }
 }
 
 /// Listening on or off without opening the app.
 struct ToggleListeningIntent: AudioRecordingIntent, LiveActivityIntent {
     static let title: LocalizedStringResource = "Start or Stop Listening"
+    static let description = IntentDescription("Listening on if it's off, off if it's on.")
     static let supportedModes: IntentModes = [.background, .foreground(.dynamic)]
     static let authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
 
@@ -55,6 +56,7 @@ struct ToggleListeningIntent: AudioRecordingIntent, LiveActivityIntent {
 
 struct StartListeningIntent: AudioRecordingIntent, LiveActivityIntent {
     static let title: LocalizedStringResource = "Start Listening"
+    static let description = IntentDescription("Switch WTF's listening on. If iOS won't allow it from the background, WTF opens to start it.")
     static let supportedModes: IntentModes = [.background, .foreground(.dynamic)]
     static let authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
 
@@ -70,6 +72,7 @@ struct StartListeningIntent: AudioRecordingIntent, LiveActivityIntent {
 /// Not an audio-recording intent: it never records, and it ends every card.
 struct StopListeningIntent: LiveActivityIntent {
     static let title: LocalizedStringResource = "Stop Listening"
+    static let description = IntentDescription("Stop listening and remove the Lock Screen card.")
     static let openAppWhenRun = false
     static let authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
 
@@ -91,7 +94,7 @@ struct ReadMyListIntent: AudioPlaybackIntent {
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let answer = await AppModel.shared.listFromShortcut()
-        return .result(dialog: answerDialog(answer))
+        return .result(dialog: await answerDialog(answer))
     }
 }
 
@@ -134,17 +137,24 @@ struct WTFMenuIntent: AudioPlaybackIntent, LiveActivityIntent {
             read = false
         case .list: answer = await AppModel.shared.listFromShortcut()
         }
-        return .result(dialog: read ? answerDialog(answer) : "\(answer)")
+        if read { return .result(dialog: await answerDialog(answer)) }
+        return .result(dialog: "\(answer)")
     }
 }
 
 extension AppIntent {
     /// What Siri says or shows for an answer. With headphones in, WTF's already reading it into
-    /// them: Siri saying it as well would talk over it.
+    /// them: Siri saying it as well would talk over it, and even its short line would cut into
+    /// the reading, so that waits until the reading's about done.
     @MainActor
-    func answerDialog(_ answer: String) -> IntentDialog {
-        if ReadAloud.headphonesOn { return "Reading it into your headphones." }
-        return "\(answer)"
+    func answerDialog(_ answer: String) async -> IntentDialog {
+        guard ReadAloud.headphonesOn else { return "\(answer)" }
+        // About three words a second at normal speed, as ReadAloud reckons; capped well short of
+        // iOS's limit, as working out the answer has already used some of it.
+        let words = Double(answer.split(whereSeparator: \.isWhitespace).count)
+        let seconds = min(words / (3 * max(ReadAloud.speed, 0.1)) + 0.5, 15)
+        try? await Task.sleep(for: .seconds(seconds))
+        return "Reading it into your headphones."
     }
 
     /// iOS won't let WTF switch the microphone on from the background: bring WTF forward, where

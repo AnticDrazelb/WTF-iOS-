@@ -34,6 +34,8 @@ actor SpeechEngine {
             equivalent = await SpeechTranscriber.supportedLocale(equivalentTo: phone)
         }
         let found = equivalent ?? Locale(identifier: "en-US")
+        // For Better Accuracy, which only knows English: what's transcribed, not the iPhone's language.
+        UserDefaults.standard.set(found.language.languageCode == .english, forKey: "transcribesEnglish")
         locale = found
         return found
     }

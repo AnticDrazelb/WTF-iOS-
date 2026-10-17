@@ -157,7 +157,7 @@ final class ThreadsTests: XCTestCase {
         let ten = Calendar.current.date(bySettingHour: 10, minute: 0, second: 0, of: t0)!
         let s = QuickRecap.spoken(t, start: ten, now: ten.addingTimeInterval(20))!
         XCTAssertTrue(s.hasPrefix("You were saying, 17 seconds ago: Well I was going"), s)
-        XCTAssertTrue(s.hasSuffix("lovely little\u{2026} Then Speaker 2 cut in."), s)
+        XCTAssertTrue(s.hasSuffix("lovely little\u{2026} Then someone cut in."), s)
     }
 
     func testSpokenRecapDoesntCallAnUnknownVoiceSpeech() {
@@ -207,6 +207,14 @@ final class ThreadsTests: XCTestCase {
         XCTAssertEqual(Prompts.sentences(about: "Garage appointment", in: lines), ["The garage said Thursday."])
         XCTAssertEqual(Prompts.sentences(about: "Mom's birthday", in: lines), ["Right, so we need to sort mom's birthday."])
         XCTAssertTrue(Prompts.thread("MOT", leftAt: nil, lines: lines).contains("remind me where I'd got to with MOT"))
+    }
+
+    func testSentencesMatchWholeWordsNotParts() {
+        let lines = "[13:16:00] Speech: Today was long. Monday works. The farm shop shuts at five. Sports day is on Friday."
+        XCTAssertEqual(Prompts.sentences(about: "Sports day", in: lines), ["Sports day is on Friday."])
+        XCTAssertEqual(Prompts.sentences(about: "Far", in: lines), [])
+        // A plural is still found.
+        XCTAssertEqual(Prompts.sentences(about: "Shops", in: lines), ["The farm shop shuts at five."])
     }
 
     func testCorrectionsFixAWordButNeverRewrite() {
